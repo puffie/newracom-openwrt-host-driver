@@ -37,6 +37,8 @@
 #include "nrc-bd.h"
 #endif /* defined(CONFIG_SUPPORT_BD) */
 
+static bool nrc_probed = true;
+
 char *fw_name = "nrc7292_cspi.bin";
 module_param(fw_name, charp, 0444);
 MODULE_PARM_DESC(fw_name, "Firmware file name");
@@ -565,6 +567,7 @@ static int nrc_platform_probe(struct platform_device *pdev)
 	if (!nw->fw_priv) {
 		pr_err("failed to initialize fw");
 		ret = -EINVAL;
+		nrc_probed = false;
 		goto fail;
 	}
 
@@ -572,6 +575,7 @@ static int nrc_platform_probe(struct platform_device *pdev)
 	if (!nw->hif) {
 		pr_err("failed to initialize hif");
 		ret = -EINVAL;
+		nrc_probed = false;
 		goto fail;
 	}
 
@@ -705,6 +709,11 @@ static int __init nrc_init(void)
 	if (err)
 		goto fail_driver_register;
 
+	if (nrc_probed == false) {
+		platform_device_unregister(&nrc_device);
+		platform_driver_unregister(&nrc_driver);
+		return -EINVAL;
+	}
 	nrc_set_bss_max_idle_offset(bss_max_idle_offset);
 
 	return 0;

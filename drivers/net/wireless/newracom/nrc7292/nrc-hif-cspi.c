@@ -42,6 +42,7 @@
 static bool once;
 static bool cspi_suspend;
 static atomic_t irq_enabled;
+static bool spi_probed = true;
 static u16 total_sta=0; /* total number of STA  connected */
 static u16 remain_sta=0; /* number of STA remaining after clearing STA */
 #define TCN  (2*1)
@@ -2126,7 +2127,7 @@ static int c_spi_probe(struct spi_device *spi)
 	struct nrc_hif_device *hdev = spi->dev.platform_data;
 	struct nrc_spi_priv *priv = hdev->priv;
 	struct spi_sys_reg *sys = &priv->hw.sys;
-	int ret;
+	int ret, i, chip_id, retry = 0;
 
 	priv->spi = spi;
 	priv->loopback_prev_cnt = 0;
@@ -2142,6 +2143,7 @@ static int c_spi_probe(struct spi_device *spi)
 	spi_set_drvdata(spi, hdev);
 	priv->ops = &cspi_ops;
 
+try_again:
 	if (fw_name && enable_hspi_init) {
 		spi_reset(hdev);
 #if defined(CONFIG_CHECK_READY)
@@ -2149,6 +2151,7 @@ static int c_spi_probe(struct spi_device *spi)
 #endif /* defined(CONFIG_CHECK_READY) */
 	}
 
+#if 0
 	/* Read the register */
 	ret = c_spi_read_regs(spi, C_SPI_WAKE_UP, (void *)sys, sizeof(*sys));
 	if (ret < 0) {
@@ -2156,14 +2159,42 @@ static int c_spi_probe(struct spi_device *spi)
 		priv->spi = NULL;
 		goto fail;
 	}
-
-	if (fw_name) {
-		spi_reset(hdev);
-#if defined(CONFIG_CHECK_READY)
-		while (!c_check_device_ready(spi));
-#endif /* defined(CONFIG_CHECK_READY) */
+#endif
+	/**
+	 * it would take some time to be ready after reset according to an SoC.
+	 * so, it is necessary to check the status several times.
+	 */
+	for (i = 0; i < 20; i++) {
+		mdelay(50);
+		ret = c_spi_read_regs(spi, C_SPI_WAKE_UP, (void *)sys,
+								sizeof(struct spi_sys_reg));
+		chip_id = be16_to_cpu(sys->chip_id);
+		nrc_dbg(NRC_DBG_HIF, "SPI probing. chip_id:%04x modem_id:%08x status:%d",
+				chip_id, be32_to_cpu(sys->modem_id), sys->status);
+		if (ret == 0) {
+			if (chip_id == 0x4791 || chip_id == 0x7292 ||
+				chip_id == 0x7392 || sys->status & 0x1) {
+				ret = true;
+				break;
+			}
+		}
+		nrc_dbg(NRC_DBG_HIF, "the target would not be ready after reset. try again...");
+		ret = false;
 	}
 
+	if (!ret) {
+		pr_err("failed to read the system info. try to reset again...");
+		if (retry < 2) {
+			++retry;
+			goto try_again;
+		} else {
+			pr_err("failed to read the system info finally!!");
+			pr_err("[Error] nrc7292 device not detected.");
+			priv->spi = NULL;
+			spi_probed = false;
+			goto fail;
+		}
+	}
 	c_spi_config(spi);
 	spi_set_default_credit(priv);
 
@@ -2293,6 +2324,9 @@ struct nrc_hif_device *nrc_hif_cspi_init(void)
 		goto unregister_device;
 	}
 
+	if (spi_probed == false) {
+		goto unregister_device;
+	}
 #ifdef CONFIG_TRX_BACKOFF
 	atomic_set(&priv->trx_backoff, 0);
 #endif
