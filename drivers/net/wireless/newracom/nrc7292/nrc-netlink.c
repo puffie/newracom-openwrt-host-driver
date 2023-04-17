@@ -448,8 +448,11 @@ static int halow_set_dut(struct sk_buff *skb, struct genl_info *info)
 				.sta = ieee80211_find_sta(vif,
 						vif->bss_conf.bssid)
 			};
-
+#if KERNEL_VERSION(4, 14, 17) <= NRC_TARGET_KERNEL_VERSION
 			b = ieee80211_nullfunc_get(nrc_nw->hw, vif, false);
+#else
+			b = ieee80211_nullfunc_get(nrc_nw->hw, vif);
+#endif
 			skb_set_queue_mapping(b, IEEE80211_AC_VO);
 #ifdef CONFIG_SUPPORT_CHANNEL_INFO
 			chanctx_conf = rcu_dereference(vif->chanctx_conf);
@@ -1389,7 +1392,7 @@ static int cli_app_get_info(struct sk_buff *skb, struct genl_info *info)
 		for (i = 1; str[i] != '\0'; ++i)
 			start_point = start_point * 10 + str[i] - '0';
 
-		nrc_stats_report(cmd_resp, start_point, max_number_per_response);
+		nrc_stats_report(nrc_nw, cmd_resp, start_point, max_number_per_response);
 	}
 	nla_put_string(msg, NL_SHELL_RUN_CMD_RESP, cmd_resp);
 	genlmsg_end(msg, hdr);

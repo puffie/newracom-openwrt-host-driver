@@ -56,8 +56,6 @@
  *  for each transmitted frame separated with multiple parts head, body
  *  and tail.
  *
- * need_maskrom_war: apply workaround when NRC7291 maskrom work.
- *
  * sync_auto: Determine which layer controls sync.
  *  true: controlled by driver layer
  *  false: controlled by hif layer
@@ -65,6 +63,7 @@
 struct nrc_hif_ops {
 	const char *(*name)(struct nrc_hif_device *dev);
 	bool (*check_fw)(struct nrc_hif_device *dev);
+	int (*probe)(struct nrc_hif_device *dev);
 	int (*start)(struct nrc_hif_device *dev);
 	int (*stop)(struct nrc_hif_device *dev);
 	int (*write)(struct nrc_hif_device *dev, const u8 *data, const u32 len);
@@ -92,15 +91,11 @@ struct nrc_hif_ops {
 	void (*clear_irq)(struct nrc_hif_device *dev);
 	void (*update)(struct nrc_hif_device *dev);
 	void (*set_gpio)(int v);
-	bool need_maskrom_war;
 	bool sync_auto;
-	bool (*support_fastboot)(struct nrc_hif_device *dev);
 	int (*suspend_rx_thread)(struct nrc_hif_device *dev);
 	int (*resume_rx_thread)(struct nrc_hif_device *dev);
 	int (*check_target)(struct nrc_hif_device *dev, u8 reg);
-#if defined(CONFIG_CHECK_READY)
 	bool (*check_ready)(struct nrc_hif_device *dev);
-#endif /* defined(CONFIG_CHECK_READY) */
 };
 
 /* struct nrc_hif_device - host interface driver
@@ -116,6 +111,7 @@ struct nrc_hif_ops {
  * @priv: pointer to private area for each host interface
  */
 struct nrc_hif_device {
+    struct device *dev;
 	struct nrc *nw;
 	struct nrc_hif_ops *hif_ops;
 	bool started;
@@ -125,6 +121,9 @@ struct nrc_hif_device {
 	struct sk_buff_head queue[2]; /* 0: frame, 1: wim */
 	struct work_struct work;
 	struct work_struct ps_work;
+#if defined(CONFIG_DELAY_WAKE_TARGET)
+	ktime_t ps_time;
+#endif
 };
 
 /* struct nrc_hif_rx_info - additional information on rx
@@ -193,7 +192,6 @@ static inline bool nrc_hif_check_fw(struct nrc_hif_device *dev)
 		return false;
 }
 
-#if defined(CONFIG_CHECK_READY)
 static inline bool nrc_hif_check_ready(struct nrc_hif_device *dev)
 {
 	if (dev->hif_ops->check_ready)
@@ -201,12 +199,21 @@ static inline bool nrc_hif_check_ready(struct nrc_hif_device *dev)
 	else
 		return true;
 }
-#endif /* defined(CONFIG_CHECK_READY) */
+
+static inline int nrc_hif_probe(struct nrc_hif_device *dev)
+{
+	nrc_dbg(NRC_DBG_HIF, "probe()");
+	BUG_ON(!dev->hif_ops->probe);
+	return dev->hif_ops->probe(dev);
+}
 
 static inline int nrc_hif_start(struct nrc_hif_device *dev)
 {
 	nrc_dbg(NRC_DBG_HIF, "start()");
 	BUG_ON(!dev->hif_ops->start);
+	if (dev->started) {
+		return 0;
+	}
 	dev->started = true;
 	return dev->hif_ops->start(dev);
 }
@@ -219,8 +226,12 @@ static inline int nrc_hif_stop(struct nrc_hif_device *dev)
 	if (!dev->started)
 		return 0;
 
+	flush_work(&dev->work);
+	flush_work(&dev->ps_work);
+
 	dev->hif_ops->stop(dev);
 	dev->started = false;
+
 	return true;
 }
 
@@ -289,11 +300,6 @@ static inline int nrc_hif_wait_ack(struct nrc_hif_device *dev,
 	return dev->hif_ops->wait_ack(dev, data, len);
 }
 
-static inline bool nrc_hif_check_maskrom_war(struct nrc_hif_device *dev)
-{
-	return dev->hif_ops->need_maskrom_war;
-}
-
 static inline void nrc_hif_disable_irq(struct nrc_hif_device *dev)
 {
 	if (dev->hif_ops->disable_irq)
@@ -331,14 +337,6 @@ static inline int  nrc_hif_wait_for_xmit(struct nrc_hif_device *dev,
 	if (dev->hif_ops->wait_for_xmit)
 		return dev->hif_ops->wait_for_xmit(dev, skb);
 	return -1;
-}
-
-static inline bool nrc_hif_support_fastboot(struct nrc_hif_device *dev)
-{
-	if (dev->hif_ops->support_fastboot)
-		return dev->hif_ops->support_fastboot(dev);
-
-	return false;
 }
 
 static inline void nrc_hif_config(struct nrc_hif_device *dev)
@@ -423,4 +421,10 @@ void nrc_hif_up(struct nrc *nw);
 void nrc_hif_sync_lock(struct nrc_hif_device *dev);
 void nrc_hif_sync_unlock(struct nrc_hif_device *dev);
 void nrc_hif_flush_wq(struct nrc_hif_device *dev);
+struct nrc_hif_device *nrc_hif_alloc (struct device *dev, void *priv, struct nrc_hif_ops *ops);
+void nrc_hif_free (struct nrc_hif_device *hdev);
+void nrc_hif_wake_target (struct nrc_hif_device *dev);
+void nrc_hif_sleep_target_prepare (struct nrc_hif_device *dev, int mode);
+void nrc_hif_sleep_target_start (struct nrc_hif_device *dev, int mode);
+void nrc_hif_sleep_target_end (struct nrc_hif_device *dev, int mode);
 #endif

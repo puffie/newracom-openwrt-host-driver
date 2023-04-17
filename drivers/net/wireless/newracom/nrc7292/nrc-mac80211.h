@@ -48,13 +48,15 @@ struct ieee80211_scan_ies {
 int nrc_mac80211_init(struct nrc *nr);
 void nrc_mac80211_exit(struct nrc *nr);
 
-struct nrc *nrc_alloc_hw(struct platform_device *pdev);
 void nrc_free_hw(struct nrc *nw);
+
+struct ieee80211_hw *nrc_mac_alloc_hw (size_t priv_data_len, const char *req_name);
+void nrc_mac_free_hw (struct ieee80211_hw *hw);
 
 int nrc_register_hw(struct nrc *nw);
 void nrc_unregister_hw(struct nrc *nw);
 
-void nrc_kick_txq(struct ieee80211_hw *hw);
+void nrc_kick_txq(struct nrc *hw);
 int nrc_handle_frame(struct nrc *nw, struct sk_buff *skb);
 void nrc_mac_cancel_hw_scan(struct ieee80211_hw *hw, struct ieee80211_vif *vif);
 
@@ -103,6 +105,28 @@ void nrc_reg_notifier(struct wiphy *wiphy, struct regulatory_request *request);
 int nrc_reg_notifier(struct wiphy *wiphy, struct regulatory_request *request);
 #endif
 
-void nrc_mac_clean_txq(struct nrc *nw);
+#ifdef CONFIG_S1G_CHANNEL
+void init_s1g_channels(struct nrc *nw);
+#endif /* #ifdef CONFIG_S1G_CHANNEL */
 
+void nrc_mac_clean_txq(struct nrc *nw);
+void nrc_send_beacon_loss(struct nrc *nw);
 #endif
+
+
+void nrc_mac_roc_finish(struct work_struct *work);
+void nrc_rm_vendor_ie_wowlan_pattern(struct work_struct *work);
+#if KERNEL_VERSION(4, 15, 0) > LINUX_VERSION_CODE
+void nrc_probe_timer(unsigned long data);
+void nrc_bcn_mon_timer(unsigned long data);
+#else
+void nrc_probe_timer(struct timer_list *t);
+void nrc_bcn_mon_timer(struct timer_list *t);
+#endif
+#ifdef CONFIG_NEW_TASKLET_API
+void nrc_tx_tasklet(struct tasklet_struct *t);
+#else
+void nrc_tx_tasklet(unsigned long cookie);
+#endif
+void nrc_cleanup_txq_all(struct nrc *nw);
+void nrc_cleanup_txq (struct nrc *nw, struct ieee80211_txq *txq);

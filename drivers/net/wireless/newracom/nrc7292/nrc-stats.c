@@ -427,7 +427,7 @@ void nrc_stats_print(void)
 	spin_unlock(&state_lock);
 }
 
-int nrc_stats_report(uint8_t *output, int index, int number)
+int nrc_stats_report(struct nrc* nw, uint8_t *output, int index, int number)
 {
 	struct stats_sta *cur, *next;
 	int i = 0;
@@ -445,11 +445,31 @@ int nrc_stats_report(uint8_t *output, int index, int number)
 	spin_lock(&state_lock);
 	list_for_each_entry_safe(cur, next, &state_head, list) {
 		if (i >= start) {
+			int8_t rssi = moving_average_compute(cur->rssi);
+			if (nw->chip_id == 0x7292) {
+				rssi = (rssi > MAX_SHOWN_RSSI) ? MAX_SHOWN_RSSI : rssi;
+			} else {
+				if (rssi <= -6 && rssi > -39) {
+					rssi -= 1;
+				} else if (rssi <= -69) {
+					rssi -= 1;
+					if (rssi <= -92)
+						rssi -= 1;
+					if (rssi <= -99)
+						rssi -= 1;
+					if (rssi <= -100)
+						rssi -= 1;
+					if (rssi <= -102)
+						rssi -= 1;
+					if (rssi <= -104)
+						rssi -= 1;
+				}
+			}
 			if (count > 0)
 				sprintf((output+strlen(output)), ",");
 			sprintf((output+strlen(output)), "%pM,%d,%d",
 				cur->macaddr,
-				moving_average_compute(cur->rssi),
+				rssi,
 				moving_average_compute(cur->snr));
 			count++;
 			if (count == number)

@@ -96,17 +96,17 @@ struct sk_buff *ieee80211_deauth_get(struct ieee80211_hw *hw,
 	u16 *reason_code;
 	u8 ccmp_hdr[8] = {0xfe,0x00,0x00,0x20,0x00,0x00,0x00,0x00};
 
-	if (nw == NULL || sta == NULL)
+	if (nw == NULL || (tosta && sta == NULL))
 		return NULL;
 
-	nrc_mac_dbg("%s: cipher_pairwise:%d\n", __func__, nw->cipher_pairwise);
+	nrc_mac_dbg("%s: cipher_pairwise:%d", __func__, nw->cipher_pairwise);
 	if (nw->cipher_pairwise == WLAN_CIPHER_SUITE_AES_CMAC) {
 		/* PMF Handling */
 		if(tosta) ccmp_mic_len = 8; /* only need CCMP hdr. MIC will appended on Target */
 		else ccmp_mic_len = 16; /* need CCMP + MIC hdr */
 	}
 
-	nrc_mac_dbg("%s: ccmp_mic_len:%d\n", __func__, ccmp_mic_len);
+	nrc_mac_dbg("%s: ccmp_mic_len:%d", __func__, ccmp_mic_len);
 
 	/* Normal Deauth (TRX) : MAC HDR (24B) + REASON(2B)
 	  PMF Deauth (RX): MAC HDR (24B) + CCMP(8B) + REASON(2B) + MIC (8B)
@@ -149,15 +149,21 @@ struct sk_buff *ieee80211_deauth_get(struct ieee80211_hw *hw,
 			status = IEEE80211_SKB_RXCB(skb);
 			status->flag |= RX_FLAG_DECRYPTED;
 			status->flag |= RX_FLAG_MMIC_STRIPPED;
+#if KERNEL_VERSION(4, 3, 0) <= NRC_TARGET_KERNEL_VERSION
 			status->flag |= RX_FLAG_PN_VALIDATED;
+#endif
 		}
 	} else {
 		deauth->u.deauth.reason_code = reason;
+#ifdef CONFIG_S1G_CHANNEL
+		status = IEEE80211_SKB_RXCB(skb);
+		status->band = nw->band;
+#endif /* #ifdef CONFIG_S1G_CHANNEL */
 	}
 
 #if 0
 	status = IEEE80211_SKB_RXCB(skb);
-	nrc_mac_dbg("%s: status->flag:%d\n", __func__, status->flag);
+	nrc_mac_dbg("%s: status->flag:%d", __func__, status->flag);
 	print_hex_dump(KERN_DEBUG, "deauth frame: ", DUMP_PREFIX_NONE, 16, 1,
 			skb->data, skb->len, false);
 #endif

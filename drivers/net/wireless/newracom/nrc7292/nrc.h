@@ -22,6 +22,7 @@
 #include <linux/rtnetlink.h>
 #include <linux/firmware.h>
 #include <linux/sched.h>
+#include <linux/interrupt.h>
 #include <linux/circ_buf.h>
 #include <linux/completion.h>
 #include <net/cfg80211.h>
@@ -29,44 +30,54 @@
 #include <net/ieee80211_radiotap.h>
 
 
-#define DEFAULT_INTERFACE_NAME			"nrc"
+#define DEFAULT_INTERFACE_NAME		"nrc"
 struct nrc_hif_device;
-#define WIM_SKB_MAX         (10)
-#define WIM_RESP_TIMEOUT    (msecs_to_jiffies(100))
+#define WIM_SKB_MAX			(10)
+#define WIM_RESP_TIMEOUT		(msecs_to_jiffies(100))
 #define NR_NRC_VIF			(2)
-#define NR_NRC_VIF_HW_QUEUE	(4)
-#define NR_NRC_MAX_TXQ		(130)
-#ifdef CONFIG_CHECK_DATA_SIZE
-#define NR_NRC_MAX_TXQ_SIZE	(1500*100) /* 150K */
-#endif
+#define NR_NRC_VIF_HW_QUEUE		(4)
+#define NR_NRC_MAX_TXQ			(100)
 /* VIF0 AC0~3,BCN, GP, VIF1 AC0~3,BCN */
-#define NRC_QUEUE_MAX					(NR_NRC_VIF_HW_QUEUE*NR_NRC_VIF + 3)
+#define NRC_QUEUE_MAX			(NR_NRC_VIF_HW_QUEUE*NR_NRC_VIF + 3)
 
 #ifdef CONFIG_SUPPORT_AFTER_KERNEL_3_0_36
 #else
-#define IEEE80211_NUM_ACS				(4)
-#define IEEE80211_P2P_NOA_DESC_MAX		(4)
+#define IEEE80211_NUM_ACS		(4)
+#define IEEE80211_P2P_NOA_DESC_MAX	(4)
 #endif
-#define NRC_MAX_TID						(8)
+#define NRC_MAX_TID			(8)
+
+#define EIRQ_STATUS_DEVICE_ROM		(0x00)
+#define EIRQ_STATUS_TXQUE_EIRQ		(0x01)
+#define EIRQ_STATUS_RXQUE_EIRQ		(0x02)
+#define EIRQ_STATUS_DEVICE_READY	(0x04)
+#define EIRQ_STATUS_DEVICE_SLEEP	(0x08)
+
+#define TARGET_NOTI_WDT_EXPIRED		(0x7D)
+#define TARGET_NOTI_FW_READY_FROM_WDT	(0x9D)
+#define TARGET_NOTI_W_DISABLE_ASSERTED	(0xAB)
+#define TARGET_NOTI_REQUEST_FW_DOWNLOAD	(0xDC)
+#define TARGET_NOTI_FW_READY_FROM_PS	(0xEC)
 
 enum NRC_SCAN_MODE {
 	NRC_SCAN_MODE_IDLE = 0,
-	NRC_SCAN_MODE_SCANNING,
+	NRC_SCAN_MODE_ACTIVE_SCANNING,
+	NRC_SCAN_MODE_PASSIVE_SCANNING,
 	NRC_SCAN_MODE_ABORTING,
 };
 
-#define NRC_FW_ACTIVE					(0)
-#define NRC_FW_LOADING					(1)
-#define	NRC_FW_PREPARE_SLEEP			(2)
-#define	NRC_FW_SLEEP					(3)
+#define NRC_FW_ACTIVE			(0)
+#define NRC_FW_LOADING			(1)
+#define	NRC_FW_PREPARE_SLEEP		(2)
+#define	NRC_FW_SLEEP			(3)
 
 enum NRC_DRV_STATE {
 	NRC_DRV_REBOOT = -2,
 	NRC_DRV_BOOT = -1,
 	NRC_DRV_INIT = 0,
-	NRC_DRV_STOP,
-	NRC_DRV_CLOSING,
 	NRC_DRV_CLOSED,
+	NRC_DRV_CLOSING,
+	NRC_DRV_STOP,
 	NRC_DRV_START,
 	NRC_DRV_RUNNING,
 	NRC_DRV_PS,
@@ -140,10 +151,6 @@ struct nrc_max_idle {
 struct nrc_txq {
 	u16 hw_queue; /* 0: AC_BK, 1: AC_BE, 2: AC_VI, 3: AC_VO */
 	struct list_head list;
-	struct sk_buff_head queue; /* own queue */
-#ifdef CONFIG_CHECK_DATA_SIZE
-	unsigned int data_size;
-#endif
 	unsigned long nr_fw_queueud;
 	unsigned long nr_push_allowed;
 	struct ieee80211_vif vif;
@@ -172,7 +179,8 @@ struct nrc_delayed_deauth {
 };
 
 struct nrc {
-	struct platform_device *pdev;
+	uint32_t chip_id;
+	struct device *dev;
 	struct nrc_hif_device *hif;
 
 	struct ieee80211_hw *hw;
@@ -201,6 +209,7 @@ struct nrc {
 	enum NRC_SCAN_MODE scan_mode;
 	struct workqueue_struct *workqueue;
 	struct delayed_work check_start;
+        struct tasklet_struct tx_tasklet;
 
 	char alpha2[2];
 
@@ -226,6 +235,7 @@ struct nrc {
 	bool ps_poll_pending;
 	bool ps_enabled;
 	bool ps_drv_state;
+	bool ps_modem_enabled;
 	bool invoke_beacon_loss;
 	struct timer_list dynamic_ps_timer;
 	struct workqueue_struct *ps_wq;
@@ -245,9 +255,10 @@ struct nrc {
 	bool amsdu_supported;
 	bool block_frame;
 	bool ampdu_reject;
-	bool bd_valid;
+	bool ampdu_started;
 
 	/* tx */
+	int hw_queues; /* supported hw queues */
 	spinlock_t txq_lock;
 	struct list_head txq;
 	/* 0: AC_BK, 1: AC_BE, 2: AC_VI, 3: AC_VO */
@@ -273,16 +284,13 @@ struct nrc {
 	struct delayed_work rm_vendor_ie_wowlan_pattern;
 	/* this must be assigned via nrc_mac_set_wakeup() */
 	bool wowlan_enabled;
+	int wowlan_pattern_num;
 
-	/* work for fake frames */
-	struct delayed_work fake_bcn;
-	struct delayed_work fake_prb_resp;
 
-	/* cloned beacon for cqm in deepsleep */
-	struct sk_buff *c_bcn;
-
-	/* cloned probe response for cqm in deepsleep */
-	struct sk_buff *c_prb_resp;
+	/* CQM offload */
+	struct timer_list bcn_mon_timer;
+	unsigned long beacon_timeout;
+	struct ieee80211_vif *associated_vif;
 
 	/* for processing deauth when deepsleep */
 	struct nrc_delayed_deauth d_deauth;
@@ -478,6 +486,7 @@ extern int spi_cs_num;
 extern int spi_gpio_irq;
 extern int spi_polling_interval;
 extern int spi_gdma_irq;
+extern bool loopback; 
 extern int disable_cqm;
 extern int bss_max_idle_offset;
 extern int power_save;
@@ -488,17 +497,29 @@ extern bool ndp_ack_1m;
 extern bool enable_hspi_init;
 extern bool nullfunc_enable;
 extern bool auto_ba;
-extern bool sw_enc;
+extern int sw_enc;
 extern bool signal_monitor;
 extern bool enable_usn;
 extern bool debug_level_all;
 extern bool enable_short_bi;
 extern int credit_ac_be;
 extern bool discard_deauth;
-extern bool enable_legacy_ack;
+extern bool dbg_flow_control;
+#if defined(CONFIG_S1G_CHANNEL)
+extern char *nrc_country_code;
+#endif /* CONFIG_S1G_CHANNEL */
 #if defined(CONFIG_SUPPORT_BD)
 extern char *bd_name;
 #endif /* CONFIG_SUPPORT_BD */
+#if defined(CONFIG_SUPPORT_LEGACY_ACK)
+extern bool enable_legacy_ack;
+#endif /* CONFIG_SUPPORT_LEGACY_ACK */
+#if defined(CONFIG_SUPPORT_BEACON_BYPASS)
+extern bool enable_beacon_bypass;
+#endif /* CONFIG_SUPPORT_BEACON_BYPASS */
+extern int power_save_gpio[];
+extern int beacon_loss_count;
+extern bool halow_cert;
 
 void nrc_set_bss_max_idle_offset(int value);
 void nrc_set_auto_ba(bool toggle);

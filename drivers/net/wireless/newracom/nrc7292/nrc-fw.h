@@ -40,13 +40,10 @@ struct nrc_fw_priv {
 	struct nrc *nw;
 	struct firmware *fw;
 	struct fw_frag_hdr frag_hdr;
-	int offset;
-	/* 0 : inside first 256 chunks, > 0 : inside 256-aligned chunks */
 	const u8 *fw_data_pos;
 	int remain_bytes;
 	int num_chunks;
 	int cur_chunk; /* index of chunck to be transferred */
-
 	bool fw_requested;
 	u8 index;
 	u32 index_fb;
@@ -61,6 +58,7 @@ struct nrc_fw_priv *nrc_fw_init(struct nrc *nw);
 void nrc_fw_exit(struct nrc_fw_priv *priv);
 bool nrc_check_fw_file(struct nrc *nw);
 bool nrc_check_boot_ready(struct nrc *nw);
+bool nrc_check_fw_ready(struct nrc *nw);
 void nrc_set_boot_ready(struct nrc *nw);
 void nrc_download_fw(struct nrc *nw);
 void nrc_release_fw(struct nrc *nw);

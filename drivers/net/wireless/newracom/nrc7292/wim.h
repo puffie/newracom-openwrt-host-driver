@@ -130,6 +130,7 @@ void nrc_wim_set_bssid(struct nrc *nw, struct sk_buff *skb, u8 *bssid);
  */
 void nrc_wim_set_ndp_preq(struct nrc *nw, struct sk_buff *skb, u8 enable);
 
+#if defined(CONFIG_SUPPORT_LEGACY_ACK)
 /**
  * nrc_wim_set_legacy_ack - set legacy ack mode
  * @nw: pointer to nrc hw
@@ -137,6 +138,7 @@ void nrc_wim_set_ndp_preq(struct nrc *nw, struct sk_buff *skb, u8 enable);
  * @enable: enable(1)/disable(0)
  */
 void nrc_wim_set_legacy_ack(struct nrc *nw, struct sk_buff *skb, u8 enable);
+#endif /* CONFIG_SUPPORT_LEGACY_ACK */
 
 int nrc_wim_change_sta(struct nrc *nw, struct ieee80211_vif *vif,
 		       struct ieee80211_sta *sta, u8 cmd, bool sleep);

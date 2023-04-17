@@ -502,9 +502,9 @@ static int ssp_probe(struct spi_device *spi)
 	err = request_irq(gpio_to_irq(spi->irq), ssp_hif_isr,
 			IRQF_TRIGGER_RISING | IRQF_ONESHOT, "ssp_hif", ssp);
 
-	nrc_dbg(NRC_DBG_HIF, "--spi_gpio_irq Set Done\n");
+	nrc_dbg(NRC_DBG_HIF, "--spi_gpio_irq Set Done");
 	if (err) {
-		pr_err("can't get hif IRQ\n");
+		pr_err("can't get hif IRQ");
 		goto ssp_free;
 	}
 
@@ -513,7 +513,7 @@ static int ssp_probe(struct spi_device *spi)
 	gpio_direction_input(spi_gdma_irq);
 	if (ret < 0) {
 		nrc_dbg(NRC_DBG_HIF,
-			"could not request ssp_gdma_ready gpio(%d)\n", ret);
+			"could not request ssp_gdma_ready gpio(%d)", ret);
 		goto ssp_free;
 	}
 

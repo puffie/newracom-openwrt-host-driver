@@ -26,7 +26,6 @@
 #include "nrc-hif.h"
 #include "nrc-debug.h"
 #include "nrc-fw.h"
-#include "fastboot-cm0.h"
 
 #define BOOT_START_ADDR	(0x10480000)
 #define FW_START_ADDR	(0x10400000)
@@ -52,28 +51,18 @@ static unsigned int checksum(unsigned char *buf, int size)
  * but checksum will not include padding bytes
  */
 
-static void nrc_fw_update_frag(struct nrc_fw_priv *priv, struct fw_frag *frag)
+void nrc_fw_update_frag(struct nrc_fw_priv *priv, struct fw_frag *frag)
 {
 	struct fw_frag_hdr *frag_hdr = &priv->frag_hdr;
 
-	frag_hdr->eof = ((priv->offset > 0) ? 0 :
-			(priv->cur_chunk == (priv->num_chunks - 1)));
+	frag_hdr->eof = (priv->cur_chunk == (priv->num_chunks - 1));
 
-	/*
-	 * Work-around for boot rom bug
-	 * if n_chunk is larger than 256, start to send from
-	 * middle of the firmware so that boot rom will
-	 * set correct start address again after wrap around
-	 */
-
-	if (priv->cur_chunk == priv->offset)
-		frag_hdr->address = (priv->start_addr
-				+ (priv->offset * FRAG_BYTES));
+	if (priv->cur_chunk == 0)
+		frag_hdr->address = priv->start_addr;
 	else
 		frag_hdr->address += frag_hdr->len;
 
 	frag_hdr->len = min_t(u32, FRAG_BYTES, priv->remain_bytes);
-
 	frag->eof = frag_hdr->eof;
 	frag->address = frag_hdr->address;
 	frag->len = frag_hdr->len;
@@ -83,50 +72,6 @@ static void nrc_fw_update_frag(struct nrc_fw_priv *priv, struct fw_frag *frag)
 	if (priv->csum)
 		frag->checksum = checksum(frag->payload, frag_hdr->len);
 }
-
-static void nrc_fw_send_info(struct nrc *nw, struct nrc_fw_priv *priv)
-{
-	struct nrc_hif_device *hdev = nw->hif;
-	struct sk_buff *skb;
-	uint32_t *p;
-
-	skb = dev_alloc_skb(16);
-	p = (uint32_t *)skb_put(skb, 16);
-	*p = priv->num_chunks;
-	pr_err("n_chunk:%d\n", *p);
-
-	nrc_hif_write(hdev, skb->data, skb->len);
-
-	dev_kfree_skb(skb);
-}
-
-static void nrc_fw_send_bulk(struct nrc *nw, struct nrc_fw_priv *priv)
-{
-	struct nrc_hif_device *hdev = nw->hif;
-	struct sk_buff *skb;
-	uint8_t *p;
-	int len;
-	u8 index;
-
-	skb = dev_alloc_skb(1024);
-	p = (uint8_t *)skb_put(skb, 1024);
-	len = min_t(u32, 1024, priv->remain_bytes);
-	memcpy(p, priv->fw_data_pos+priv->index_fb*1024, len);
-
-	nrc_hif_write(hdev, skb->data, skb->len);
-	priv->index_fb++;
-	priv->remain_bytes -= len;
-
-	if ((priv->index_fb != priv->num_chunks)
-		&& priv->ack) {
-		int ret = nrc_hif_wait_ack(hdev, &index, 1);
-
-		BUG_ON(ret < 0);
-	}
-
-	dev_kfree_skb(skb);
-}
-
 
 static void nrc_fw_send_frag(struct nrc *nw, struct nrc_fw_priv *priv)
 {
@@ -162,29 +107,17 @@ static void nrc_fw_send_frag(struct nrc *nw, struct nrc_fw_priv *priv)
 
 static bool nrc_fw_check_next_frag(struct nrc *nw, struct nrc_fw_priv *priv)
 {
-	bool wrap_around = false;
 	struct nrc_hif_device *hdev = nw->hif;
 	u8 index;
 	int ret;
 
 	if (priv->cur_chunk == (priv->num_chunks - 1)) {
-		if (priv->offset == 0)
-			goto last_chuck;
-		wrap_around = true;
+		return false;
 	}
 
-	if (wrap_around) {
-		priv->cur_chunk = 0;
-		priv->num_chunks = priv->offset;
-		priv->offset = 0;
-		priv->fw_data_pos = priv->fw->data;
-		priv->remain_bytes = (priv->num_chunks * FRAG_BYTES);
-		priv->frag_hdr.address = FW_START_ADDR;
-	} else {
-		priv->cur_chunk++;
-		priv->fw_data_pos += priv->frag_hdr.len;
-		priv->remain_bytes -= priv->frag_hdr.len;
-	}
+	priv->cur_chunk++;
+	priv->fw_data_pos += priv->frag_hdr.len;
+	priv->remain_bytes -= priv->frag_hdr.len;
 
 	index = priv->index;
 
@@ -197,9 +130,6 @@ static bool nrc_fw_check_next_frag(struct nrc *nw, struct nrc_fw_priv *priv)
 	priv->index++;
 
 	return true;
-
-last_chuck:
-	return false;
 }
 
 struct nrc_fw_priv *nrc_fw_init(struct nrc *nw)
@@ -221,40 +151,6 @@ void nrc_fw_exit(struct nrc_fw_priv *priv)
 }
 
 /**
- * nrc_download_boot - download boot binary to the target
- */
-void nrc_download_boot(struct nrc *nw)
-{
-	struct firmware *fw = nw->fw;
-	struct nrc_fw_priv *priv = nw->fw_priv;
-	struct nrc_hif_device *hdev = nw->hif;
-
-	priv->fw = fw;
-	priv->num_chunks = DIV_ROUND_UP(fb_cm0_len, FRAG_BYTES);
-
-	if (nrc_hif_check_maskrom_war(hdev)) {
-		priv->offset =
-		   ((priv->num_chunks > 256) ? (priv->num_chunks % 256) : 0);
-	} else {
-		priv->offset = 0;
-	}
-
-	priv->fw_data_pos = (fb_cm0 + (priv->offset * FRAG_BYTES));
-	priv->remain_bytes = (fb_cm0_len - (priv->offset * FRAG_BYTES));
-	priv->cur_chunk = priv->offset;
-	priv->index = 0;
-	priv->start_addr = BOOT_START_ADDR;
-	priv->ack = true;
-	priv->csum = true;
-
-	nrc_hif_suspend(hdev);
-	do {
-		nrc_fw_send_frag(nw, priv);
-	} while (nrc_fw_check_next_frag(nw, priv));
-	priv->fw_requested = false;
-}
-
-/**
  * nrc_download_fw - download firmware binary to the target
  */
 void nrc_download_fw(struct nrc *nw)
@@ -262,50 +158,32 @@ void nrc_download_fw(struct nrc *nw)
 	struct firmware *fw = nw->fw;
 	struct nrc_fw_priv *priv = nw->fw_priv;
 	struct nrc_hif_device *hdev = nw->hif;
-	int i;
-	bool fastboot = nrc_hif_support_fastboot(hdev);
 
-	nrc_dbg(NRC_DBG_HIF, "FW download....%s\n", fw_name);
-	if (fastboot) {
-		nrc_download_boot(nw);
-		mdelay(1);
-		priv->num_chunks = DIV_ROUND_UP(fw->size, CHUNK_SIZE);
-		priv->csum = false;
-	} else {
-		priv->num_chunks = DIV_ROUND_UP(fw->size, FRAG_BYTES);
-		priv->csum = true;
-	}
+	nrc_dbg(NRC_DBG_HIF, "FW download....%s", fw_name);
+	priv->num_chunks = DIV_ROUND_UP(fw->size, FRAG_BYTES);
+	priv->csum = true;
 	priv->fw = fw;
-
-	if (nrc_hif_check_maskrom_war(hdev)) {
-		priv->offset = ((priv->num_chunks > 256) ?
-			 (priv->num_chunks % 256) : 0);
-	} else {
-		priv->offset = 0;
-	}
-
-	priv->fw_data_pos = (fw->data + (priv->offset * FRAG_BYTES));
-	priv->remain_bytes = (fw->size - (priv->offset * FRAG_BYTES));
-	priv->cur_chunk = priv->offset;
+	priv->fw_data_pos = fw->data;
+	priv->remain_bytes = fw->size;
+	priv->cur_chunk = 0;
 	priv->index = 0;
 	priv->index_fb = 0;
 	priv->start_addr = FW_START_ADDR;
 	priv->ack = true;
 
-	nrc_hif_suspend(hdev);
+	nrc_dbg(NRC_DBG_HIF, "[%s] priv->", __func__);
+	nrc_dbg(NRC_DBG_HIF, "- fw->data:%p", priv->fw->data);
+	nrc_dbg(NRC_DBG_HIF, "- fw->size:%zd", priv->fw->size);
+	nrc_dbg(NRC_DBG_HIF, "- fw_data_pos:%p", priv->fw_data_pos);
+	nrc_dbg(NRC_DBG_HIF, "- remain_bytes:%d", priv->remain_bytes);
 
-	pr_err("start FW %d\n", priv->num_chunks);
-	if (fastboot) {
-		nrc_fw_send_info(nw, priv);
-		udelay(10);
-		for (i = 0; i < priv->num_chunks; i++)
-			nrc_fw_send_bulk(nw, priv);
-	} else {
-		do {
-			nrc_fw_send_frag(nw, priv);
-		} while (nrc_fw_check_next_frag(nw, priv));
-	}
-	pr_err("end FW\n");
+	nrc_hif_disable_irq(hdev);
+
+	pr_err("start FW %d", priv->num_chunks);
+	do {
+		nrc_fw_send_frag(nw, priv);
+	} while (nrc_fw_check_next_frag(nw, priv));
+	pr_err("end FW");
 
 	priv->fw_requested = false;
 }
@@ -321,18 +199,18 @@ bool nrc_check_fw_file(struct nrc *nw)
 		return true;
 
 	status = request_firmware((const struct firmware **)&nw->fw,
-			fw_name, &nw->pdev->dev);
+			fw_name, nw->dev);
 
-	nrc_dbg(NRC_DBG_HIF, "[%s, %d] Checking firmware... (%s)\n",
+	nrc_dbg(NRC_DBG_HIF, "[%s, %d] Checking firmware... (%s)",
 			__func__, __LINE__, fw_name);
 
 	if (status != 0) {
-		nrc_dbg(NRC_DBG_HIF, "request_firmware() is failed, status = %d, fw = %p\n",
+		nrc_dbg(NRC_DBG_HIF, "request_firmware() is failed, status = %d, fw = %p",
 				status, nw->fw);
 		goto err_fw;
 	}
 
-	nrc_dbg(NRC_DBG_HIF, "[%s, %d] OK...(%p, 0x%zx)\n",
+	nrc_dbg(NRC_DBG_HIF, "[%s, %d] OK...(%p, 0x%zx)",
 			__func__, __LINE__, nw->fw->data, nw->fw->size);
 	return true;
 
@@ -349,6 +227,12 @@ bool nrc_check_boot_ready(struct nrc *nw)
 			nrc_hif_check_fw(nw->hif));
 }
 
+bool nrc_check_fw_ready(struct nrc *nw)
+{
+	BUG_ON(!nw);
+	return (nrc_hif_check_ready(nw->hif));
+}
+
 void nrc_set_boot_ready(struct nrc *nw)
 {
 	BUG_ON(!nw);
@@ -362,3 +246,4 @@ void nrc_release_fw(struct nrc *nw)
 	release_firmware(nw->fw);
 	nw->fw = NULL;
 }
+

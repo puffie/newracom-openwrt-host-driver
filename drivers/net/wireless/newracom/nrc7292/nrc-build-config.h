@@ -19,6 +19,8 @@
 
 #include <linux/version.h>
 
+#define NRC_SW_ID       1
+
 #define NRC_BUILD_USE_HWSCAN
 /* #define CONFIG_NRC_HIF_PRINT_BEACON */
 /* #define CONFIG_NRC_HIF_PRINT_RX_AUTH */
@@ -30,13 +32,7 @@
 
 /*#define NRC_TEST_SUPPRESS_STA_KEEEP_ALIVE*/
 
-/*
- * README This is a temporary feature.
- * Use only NRC7392
- */
-#ifndef CONFIG_SUPPORT_MT76x8
-#define CONFIG_CHECK_READY
-#endif
+/*#define CONFIG_SPI_HALF_DUPLEX*/
 
 /*
  * README This is a temporary feature.
@@ -45,11 +41,15 @@
 /* #define CONFIG_TRX_BACKOFF */
 
 /*
- * README This is a temporary feature.
  * To change the transmission order of txq in the nrc driver.
  */
-/* #define CONFIG_TXQ_ORDER_CHANGE_NRC_DRV */
+#define CONFIG_TXQ_ORDER_CHANGE_NRC_DRV
 
+/*
+ * README This is a temporary feature.
+ * Use S1G channel on host
+ */
+/* #define CONFIG_S1G_CHANNEL */
 
 /*
  * These depend on kernel version.
@@ -58,6 +58,18 @@
  * #define NRC_TARGET_KERNEL_VERSION KERNEL_VERSION(4, 4, 1)
  */
 #define NRC_TARGET_KERNEL_VERSION LINUX_VERSION_CODE
+
+
+#if KERNEL_VERSION(5, 10, 0) <= NRC_TARGET_KERNEL_VERSION
+#else
+#ifdef CONFIG_S1G_CHANNEL
+#undef CONFIG_S1G_CHANNEL
+#endif /* CONFIG_S1G_CHANNEL */
+#endif /* KERNEL_VERSION(5, 10, 0) <= NRC_TARGET_KERNEL_VERSION */
+
+#ifdef CONFIG_S1G_CHANNEL
+/* #define S1G_INCLUDE_4M_OP_2M_TX */
+#endif
 
 #if KERNEL_VERSION(4, 10, 0) <= NRC_TARGET_KERNEL_VERSION
 #define GENL_ID_GENERATE 0
@@ -68,10 +80,15 @@
 #if KERNEL_VERSION(4, 7, 0) <= NRC_TARGET_KERNEL_VERSION
 #define CONFIG_USE_NEW_BAND_ENUM
 #endif
-#if KERNEL_VERSION(4, 6, 0) <= NRC_TARGET_KERNEL_VERSION
+#if KERNEL_VERSION(4, 6, 0) <= NRC_TARGET_KERNEL_VERSION || \
+    (KERNEL_VERSION(4, 4, 69) <= NRC_TARGET_KERNEL_VERSION && \
+     KERNEL_VERSION(4, 5, 0) > NRC_TARGET_KERNEL_VERSION)
 #define CONFIG_USE_IEEE80211_AMPDU_PARAMS
 #endif
-#if KERNEL_VERSION(4, 4, 0) <= NRC_TARGET_KERNEL_VERSION
+#if (KERNEL_VERSION(4, 4, 0) <= NRC_TARGET_KERNEL_VERSION && \
+     KERNEL_VERSION(4, 4, 69) > NRC_TARGET_KERNEL_VERSION) || \
+    (KERNEL_VERSION(4, 5, 0) <= NRC_TARGET_KERNEL_VERSION && \
+     KERNEL_VERSION(4, 6, 0) > NRC_TARGET_KERNEL_VERSION)
 #define CONFIG_SUPPORT_NEW_AMPDU_ACTION
 #endif
 #if KERNEL_VERSION(4, 3, 0) <= NRC_TARGET_KERNEL_VERSION
@@ -88,6 +105,9 @@
 #if KERNEL_VERSION(4, 0, 0) <= NRC_TARGET_KERNEL_VERSION
 #define CONFIG_SUPPORT_CCMP_256
 #define CONFIG_SUPPORT_KEY_RESERVE_TAILROOM
+#define CONFIG_SUPPORT_GCMP  //To support GCMP & GCMP-256 by using SW encryption.
+#define CONFIG_SUPPORT_GMAC  //To support GMAC & GMAC-256 by using SW encryption.
+
 #endif
 #if KERNEL_VERSION(3, 19, 0) <= NRC_TARGET_KERNEL_VERSION
 #define CONFIG_SUPPORT_IFTYPE_OCB
@@ -119,8 +139,8 @@
 #define CONFIG_SUPPORT_NEW_MAC_TX
 #define CONFIG_SUPPORT_P2P
 #define CONFIG_SUPPORT_BD
-/* To use JPPC board data file & FW */
-#undef CONFIG_SUPPORT_JPPC
+#define CONFIG_SUPPORT_LEGACY_ACK
+#define CONFIG_SUPPORT_BEACON_BYPASS
 #endif
 #if KERNEL_VERSION(3, 0, 0) <= NRC_TARGET_KERNEL_VERSION
 #define CONFIG_SUPPORT_TX_FRAMES_PENDING
@@ -143,6 +163,8 @@
 #undef CONFIG_USE_CHANNEL_CONTEXT
 #endif
 
+#define CONFIG_SUPPORT_IBSS
+
 /* for backports */
 /*
  * #ifdef CONFIG_USE_IFF_NO_QUEUE_FLAG
@@ -150,10 +172,30 @@
  * #endif
  */
 
-/* Check tx queue total data size, not just queue length */
-#define CONFIG_CHECK_DATA_SIZE
+/* uncomment define below to set tx power via iw or iwconfig */
+#define CONFIG_SUPPORT_IW_IWCONFIG_TXPWR
 
-/* uncomment define below to set tx power via iw */
-#define CONFIG_SUPPORT_IW_TXPWR
+/* Use DT for spi device,
+   spi_busnum_to_master fuction which is used to call spi_new_device
+   has been deleted since 5.16 kernel version */
+
+#if KERNEL_VERSION(5, 16, 0) <= NRC_TARGET_KERNEL_VERSION
+#define CONFIG_SPI_USE_DT
+#endif
+/* You can enable forcely in current version */
+//#define CONFIG_SPI_USE_DT
+
+#if KERNEL_VERSION(5, 4, 0) <= NRC_TARGET_KERNEL_VERSION
+#define CONFIG_USE_MAX_MTU
+#endif
+
+#if KERNEL_VERSION(5, 9, 0) <= NRC_TARGET_KERNEL_VERSION
+#define CONFIG_NEW_TASKLET_API
+#endif
+
+/* If this configuration is enabled, 
+   the function to wake up the target will be delayed 
+   from the start of sleep up to TARGET_MAX_TIME_TO_FALL_ASLEEP. */
+//#define CONFIG_DELAY_WAKE_TARGET  
 
 #endif

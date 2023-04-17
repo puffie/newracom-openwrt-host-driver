@@ -19,11 +19,13 @@
 #include "wim.h"
 #include "nrc-hif.h"
 #include "nrc-fw.h"
-#include "nrc-recovery.h"
 #include "nrc-mac80211.h"
-
+#ifdef CONFIG_S1G_CHANNEL
+#include "nrc-s1g.h"
+#endif
 #if defined(CONFIG_SUPPORT_BD)
 #include "nrc-bd.h"
+extern struct bd_supp_param g_supp_ch_list;
 #endif /* defined(CONFIG_SUPPORT_BD) */
 
 static void nrc_wim_skb_bind_vif(struct sk_buff *skb, struct ieee80211_vif *vif)
@@ -131,10 +133,12 @@ void nrc_wim_set_ndp_preq(struct nrc *nw, struct sk_buff *skb, u8 enable)
 	nrc_wim_skb_add_tlv(skb, WIM_TLV_NDP_PREQ, sizeof(u8), &enable);
 }
 
+#if defined(CONFIG_SUPPORT_LEGACY_ACK)
 void nrc_wim_set_legacy_ack(struct nrc *nw, struct sk_buff *skb, u8 enable)
 {
 	nrc_wim_skb_add_tlv(skb, WIM_TLV_LEGACY_ACK, sizeof(u8), &enable);
 }
+#endif /* CONFIG_SUPPORT_LEGACY_ACK */
 
 int nrc_wim_change_sta(struct nrc *nw, struct ieee80211_vif *vif,
 		       struct ieee80211_sta *sta, u8 cmd, bool sleep)
@@ -171,11 +175,19 @@ int nrc_wim_hw_scan(struct nrc *nw, struct ieee80211_vif *vif,
 	int j;
 	bool avail_ch_flag = false;
 #endif /* defined(CONFIG_SUPPORT_BD) */
+
 	if (ies) {
 		size += tlv_len(ies->common_ie_len);
+		size += sizeof(struct wim_tlv);
+#ifdef  CONFIG_S1G_CHANNEL
+		size += ies->len[NL80211_BAND_S1GHZ];
+#else
 		size += ies->len[NL80211_BAND_2GHZ];
 		size += ies->len[NL80211_BAND_5GHZ];
-	} else {
+#endif  /* ifdef  CONFIG_S1G_CHANNEL */
+	}
+
+	if (req->ie) {
 		size += tlv_len(req->ie_len);
 	}
 
@@ -189,8 +201,14 @@ int nrc_wim_hw_scan(struct nrc *nw, struct ieee80211_vif *vif,
 		req->n_channels = WIM_MAX_SCAN_CHANNEL;
 
 	p->n_channels = req->n_channels;
-	for (i = 0; i < req->n_channels; i++)
+	for (i = 0; i < req->n_channels; i++){
+#ifdef CONFIG_S1G_CHANNEL
+		p->channel[i] = FREQ_TO_100KHZ(req->channels[i]->center_freq, req->channels[i]->freq_offset);
+#else
 		p->channel[i] = req->channels[i]->center_freq;
+#endif  /* ifdef  CONFIG_S1G_CHANNEL */
+	}
+
 #if defined(CONFIG_SUPPORT_BD)
 #if BD_DEBUG
 	nrc_dbg(NRC_DBG_MAC, "org_ch_freq");
@@ -215,7 +233,11 @@ int nrc_wim_hw_scan(struct nrc *nw, struct ieee80211_vif *vif,
 		j = 0;
 		for (i = 0; i < req->n_channels; i++) {
 			if(p->channel[i]) {
+#ifdef CONFIG_S1G_CHANNEL
+				p->channel[j] = FREQ_TO_100KHZ(req->channels[i]->center_freq, req->channels[i]->freq_offset);
+#else
 				p->channel[j] = req->channels[i]->center_freq;
+#endif  /* ifdef  CONFIG_S1G_CHANNEL */
 				j++;
 			}
 		}
@@ -244,28 +266,34 @@ int nrc_wim_hw_scan(struct nrc *nw, struct ieee80211_vif *vif,
 		int b;
 
 		p = nrc_wim_skb_add_tlv(skb,
-					WIM_TLV_SCAN_PROBE_REQ_IE,
-					ies->common_ie_len +
+					WIM_TLV_SCAN_BAND_IE,
+#ifdef  CONFIG_S1G_CHANNEL
+					ies->len[NL80211_BAND_S1GHZ],
+#else
 					ies->len[NL80211_BAND_2GHZ] +
 					ies->len[NL80211_BAND_5GHZ],
+#endif /* ifdef  CONFIG_S1G_CHANNEL */
 					NULL);
 
-		for (b = NL80211_BAND_2GHZ; b < ARRAY_SIZE(ies->ies); b++)
+		for (b = NL80211_BAND_2GHZ; b < ARRAY_SIZE(ies->ies); b++) {
 			if (ies->ies[b] && ies->len[b] > 0) {
 				memcpy(p, ies->ies[b], ies->len[b]);
 				p += ies->len[b];
 			}
-
-		if (ies->common_ies && ies->common_ie_len > 0) {
-			memcpy(p, ies->common_ies, ies->common_ie_len);
-			p += ies->common_ie_len;
 		}
 
-	} else if (req->ie)
+		p = nrc_wim_skb_add_tlv(skb,
+					WIM_TLV_SCAN_COMMON_IE,
+					ies->common_ie_len,
+					(void *)ies->common_ies);
+	}
+
+	if (req->ie) {
 		nrc_wim_skb_add_tlv(skb,
 				    WIM_TLV_SCAN_PROBE_REQ_IE,
 				    req->ie_len,
 				    (void *)req->ie);
+	}
 
 	return nrc_xmit_wim_request(nw, skb);
 }
@@ -357,6 +385,9 @@ int nrc_wim_install_key(struct nrc *nw, enum set_key_cmd cmd,
 		addr = sta->addr;
 	} else if (vif->type == NL80211_IFTYPE_AP
 			|| vif->type == NL80211_IFTYPE_MESH_POINT
+#if defined(CONFIG_SUPPORT_IBSS)
+			|| vif->type == NL80211_IFTYPE_ADHOC
+#endif
 			|| vif->type == NL80211_IFTYPE_P2P_GO) {
 		addr = vif->addr;
 	} else {
@@ -366,12 +397,24 @@ int nrc_wim_install_key(struct nrc *nw, enum set_key_cmd cmd,
 	if (key->flags & IEEE80211_KEY_FLAG_PAIRWISE) {
 		if (!((vif->type == NL80211_IFTYPE_AP)
 				|| (vif->type == NL80211_IFTYPE_MESH_POINT)
+#if defined(CONFIG_SUPPORT_IBSS)
+				|| (vif->type == NL80211_IFTYPE_ADHOC)
+#endif
 				|| (vif->type == NL80211_IFTYPE_P2P_GO)))
 			aid = vif->bss_conf.aid;
 		else if (sta)
 			aid = sta->aid;
-	} else
-		aid = 0;
+	} else {
+		if (vif->type == NL80211_IFTYPE_MESH_POINT) {
+			if (sta) {
+				aid = sta->aid;
+			} else {
+				aid = vif->bss_conf.aid;
+			}
+		} else {
+			aid = 0;
+		}
+	}
 
 	ether_addr_copy(p->mac_addr, addr);
 	p->aid = aid;
@@ -425,6 +468,11 @@ static int to_wim_sta_type(enum nl80211_iftype type)
 	case NL80211_IFTYPE_UNSPECIFIED:
 		sta_type = WIM_STA_TYPE_NONE;
 		break;
+#ifdef CONFIG_SUPPORT_IBSS
+	case NL80211_IFTYPE_ADHOC:
+		sta_type = WIM_STA_TYPE_IBSS;
+		break;
+#endif		
 	default:
 		sta_type = -ENOTSUPP;
 		break;
@@ -438,10 +486,6 @@ int nrc_wim_set_sta_type(struct nrc *nw, struct ieee80211_vif *vif)
 	struct sk_buff *skb;
 	int sta_type, skb_len;
 
-	if ((nw->vif[0] && nw->vif[1])
-	    || vif->type == NL80211_IFTYPE_MESH_POINT) {
-		sw_enc = 1;
-	}
 
 	sta_type = to_wim_sta_type(ieee80211_iftype_p2p(vif->type, vif->p2p));
 	if (sta_type < 0)
@@ -457,6 +501,7 @@ int nrc_wim_set_sta_type(struct nrc *nw, struct ieee80211_vif *vif)
 	nrc_wim_skb_add_tlv(skb, WIM_TLV_STA_TYPE, sizeof(u32), &sta_type);
 	if (nrc_mac_is_s1g(nw) && sta_type == WIM_STA_TYPE_AP) {
 		nrc_wim_skb_add_tlv(skb, WIM_TLV_NDP_ACK_1M, sizeof(u8), &ndp_ack_1m);
+		nrc_wim_set_ndp_preq(nw, skb, true);
 	}
 
 	return nrc_xmit_wim_request(nw, skb);
@@ -517,12 +562,15 @@ void nrc_wim_handle_fw_ready(struct nrc *nw)
 
 #if defined(CONFIG_SUPPORT_BD)
 	struct regulatory_request request;
+
 	request.alpha2[0] = nw->alpha2[0];
 	request.alpha2[1] = nw->alpha2[1];
 #endif
+
 	nrc_ps_dbg("[%s,L%d]\n", __func__, __LINE__);
 	atomic_set(&nw->fw_state, NRC_FW_ACTIVE);
 	nrc_hif_resume(hdev);
+
 #if defined(CONFIG_SUPPORT_BD)
 	nrc_reg_notifier(nw->hw->wiphy, &request);
 #endif
@@ -533,9 +581,7 @@ void nrc_wim_handle_fw_reload(struct nrc *nw)
 {
 	nrc_ps_dbg("[%s,L%d]\n", __func__, __LINE__);
 	atomic_set(&nw->fw_state, NRC_FW_LOADING);
-	//nrc_recovery_wdt_stop(nw);
 	nrc_hif_cleanup(nw->hif);
-	msleep(200);
 	if (nrc_check_fw_file(nw)) {
 		nrc_download_fw(nw);
 		nw->hif->hif_ops->config(nw->hif);
@@ -604,7 +650,7 @@ static int nrc_wim_update_tx_credit(struct nrc *nw, struct wim *wim)
 			(int)atomic_read(&nw->tx_credit[9]));
 #endif
 
-	nrc_kick_txq(nw->hw);
+	nrc_kick_txq(nw);
 
 	return 0;
 }
@@ -674,6 +720,18 @@ static int nrc_wim_event_handler(struct nrc *nw,
 	case WIM_EVENT_CH_SWITCH:
 		ieee80211_chswitch_done(vif, true);
 		break;
+	case WIM_EVENT_LBT_ENABLED:
+		if (!enable_usn) {
+			enable_usn = true;
+			nrc_dbg(NRC_DBG_HIF, "lbt enabled");
+		}
+		break;
+	case WIM_EVENT_LBT_DISABLED:
+		if (enable_usn) {
+			enable_usn = false;
+			nrc_dbg(NRC_DBG_HIF, "lbt disabled");
+		}
+		break;
 	}
 
 	return 0;
@@ -707,22 +765,6 @@ int nrc_wim_rx(struct nrc *nw, struct sk_buff *skb, u8 subtype)
 	return 0; /* for the time being */
 }
 
-/* to be removed */
-int __nrc_wim_ampdu_action(struct nrc *nw, enum WIM_AMPDU_ACTION action,
-		struct ieee80211_sta *sta, u16 tid)
-{
-	struct sk_buff *skb;
-
-	skb = nrc_wim_alloc_skb(nw, WIM_CMD_AMPDU_ACTION,
-			tlv_len(sizeof(u16)) + tlv_len(ETH_ALEN));
-
-	nrc_wim_skb_add_tlv(skb, WIM_TLV_AMPDU_MODE, sizeof(u16), &action);
-	nrc_wim_add_mac_addr(nw, skb, sta->addr);
-	nrc_wim_skb_add_tlv(skb, WIM_TLV_TID, sizeof(u16), &tid);
-
-	return nrc_xmit_wim_request(nw, skb);
-}
-
 int nrc_wim_ampdu_action(struct nrc *nw, struct ieee80211_vif *vif,
 			enum WIM_AMPDU_ACTION action,
 			struct ieee80211_sta *sta, u16 tid)
@@ -730,7 +772,7 @@ int nrc_wim_ampdu_action(struct nrc *nw, struct ieee80211_vif *vif,
 	struct sk_buff *skb;
 
 	skb = nrc_wim_alloc_skb_vif(nw, vif, WIM_CMD_AMPDU_ACTION,
-				tlv_len(sizeof(u16)) + tlv_len(ETH_ALEN));
+				tlv_len(sizeof(u16)) + tlv_len(ETH_ALEN) + tlv_len(sizeof(u16)));
 
 	nrc_wim_skb_add_tlv(skb, WIM_TLV_AMPDU_MODE, sizeof(u16), &action);
 	nrc_wim_add_mac_addr(nw, skb, sta->addr);

@@ -25,16 +25,18 @@
 #include "nrc-hif-cspi.h"
 
 unsigned long nrc_debug_mask;
-static struct nrc *nrc_nw;
 
-void nrc_dbg_init(struct nrc *nw)
+struct device *g_dev;
+
+void nrc_dbg_init(struct device *dev)
 {
 	if (debug_level_all) {
 		nrc_debug_mask = DEFAULT_NRC_DBG_MASK_ALL;
 	} else {
 		nrc_debug_mask = DEFAULT_NRC_DBG_MASK;
 	}
-	nrc_nw = nw;
+
+    g_dev = dev;
 }
 
 void nrc_dbg_enable(enum NRC_DEBUG_MASK mk)
@@ -53,9 +55,6 @@ void nrc_dbg(enum NRC_DEBUG_MASK mk, const char *fmt, ...)
 	int i;
 	static char buf[512] = {0,};
 
-	if (WARN_ON(!nrc_nw))
-		return;
-
 	if (!test_bit(mk, &nrc_debug_mask))
 		return;
 
@@ -63,22 +62,22 @@ void nrc_dbg(enum NRC_DEBUG_MASK mk, const char *fmt, ...)
 	i = vsprintf(buf, fmt, args);
 	va_end(args);
 
-	if (!nrc_nw || nrc_nw->loopback || !nrc_nw->pdev)
+	if (g_dev == NULL)
 		pr_info("%s\n", buf);
 	else
-		dev_dbg(&nrc_nw->pdev->dev, "%s\n", buf);
+		dev_dbg(g_dev, "%s\n", buf);
 }
 
 /* TODO: steve
  *
  * Let's move to trace framework.
  */
-void nrc_mac_dump_frame(struct nrc *nw, struct sk_buff *skb, const char *prefix)
+int nrc_mac_dump_frame(struct nrc *nw, struct sk_buff *skb, const char *prefix)
 {
 	struct ieee80211_hdr *hdr = (struct ieee80211_hdr *)skb->data;
 	__le16 fc = hdr->frame_control;
 
-	return;
+	return 0;
 
 	if (ieee80211_is_nullfunc(fc) || ieee80211_is_qos_nullfunc(fc)) {
 		nrc_dbg(NRC_DBG_MAC, "%s %snullfunc (%c)",
@@ -118,6 +117,8 @@ void nrc_mac_dump_frame(struct nrc *nw, struct sk_buff *skb, const char *prefix)
 
 		nrc_dbg(NRC_DBG_MAC, "%s beacon %s", prefix, str);
 	}
+
+	return 0;
 }
 
 static char *wim_cmd_str[] = {
@@ -156,6 +157,45 @@ void nrc_dump_wim(struct sk_buff *skb)
 		"resp",
 		hif->vifindex, wim->seqno, hif->len);
 }
+
+#define CREDIT_QUEUE_MAX 12
+extern void nrc_hif_cspi_read_credit(struct nrc_hif_device *hdev, int q, int *p_front, int *p_rear, int *p_credit); 
+
+static int nrc_debugfs_txq_read(void *data, u64 *val)
+{
+	struct nrc *nw = (struct nrc *)data;
+	int i;
+
+	for (i = 0; i < CREDIT_QUEUE_MAX; i++) {
+		int front, rear, credit;
+		nrc_hif_cspi_read_credit(nw->hif, i, &front, &rear, &credit);
+		printk(KERN_INFO "CREDIT[%d] front=%d rear=%d credit=%d\n",
+				i, front, rear, credit);
+	}
+
+	for (i = 0; i < IEEE80211_NUM_ACS*3; i++) {
+		printk(KERN_INFO "AC[%d] tx_credit=%d tx_pend=%d\n", 
+				i,
+				atomic_read(&nw->tx_credit[i]),
+				atomic_read(&nw->tx_pend[i]));
+	}
+
+	*val = 0;
+	return 0;
+}
+
+static int nrc_debugfs_txq_write(void *data, u64 val)
+{
+	return 0;
+}
+
+DEFINE_SIMPLE_ATTRIBUTE(nrc_debugfs_txq_fops,
+                       nrc_debugfs_txq_read,
+                       nrc_debugfs_txq_write,
+                       "%llu\n");
+
+
+
 
 /* Debugfs */
 
@@ -377,7 +417,7 @@ static int nrc_debugfs_loopback_write(void *data, u64 val)
 
 	time_info_array = (struct lb_time_info*)kzalloc(sizeof(struct lb_time_info) * lb_count, GFP_KERNEL);
 	if (!time_info_array) {
-		pr_err("Failed to alloc buffers...\n");
+		pr_err("Failed to alloc buffers...");
 		return 0;
 	}
 	hif = (struct hif_lb_hdr *)g_skb->data;
@@ -423,7 +463,7 @@ static int nrc_debugfs_loopback_write(void *data, u64 val)
 		queue_work(nw->workqueue, &hdev->work);
 	}
 	nrc_hif_test_status(hdev);
-	pr_err("[Loopback Test] TX Done.\n");
+	pr_err("[Loopback Test] TX Done.");
 
 	return 0;
 }
@@ -441,7 +481,10 @@ static int nrc_debugfs_lb_count_read(void *data, u64 *val)
 
 static int nrc_debugfs_lb_count_write(void *data, u64 val)
 {
-	lb_count = (u32)val;
+	if ((u32)val > 0xffff)
+		lb_count = 0xffff;
+	else
+		lb_count = (u32)val;
 	if (g_skb) {
 		struct hif_lb_hdr *h = (struct hif_lb_hdr*)g_skb->data;
 		h->count = lb_count;
@@ -507,7 +550,7 @@ static ssize_t nrc_debugfs_hspi_sample_write(struct file *file, const char __use
 		if (!g_skb)
 			return ret;
 	} else {
-		pr_err("[Loopback Teat] the length of sample data must be bigger than %d.\n", g_skb_len);
+		pr_err("[Loopback Teat] the length of sample data must be bigger than %d.", g_skb_len);
 		return ret;
 	}
 
@@ -555,11 +598,10 @@ static ssize_t nrc_debugfs_hspi_report_write(struct file *file, const char __use
 	return ret;
 }
 
-#define TIMESTAMP_SUB(x, y)	((x) - (y))
 #define RESET_VARS()	(c = sum_tx = sum_rx = 0)
 #define LB_INFO(x)		((time_info_array + i)->_##x)
 #define LB_INFO_(x)		((time_info_array + i - 1)->_##x)
-#define LB_SUB(x)		((unsigned long)TIMESTAMP_SUB(LB_INFO(x), LB_INFO_(x)))
+#define LB_SUB(x)		(LB_INFO(x) - LB_INFO_(x))
 
 static int nrc_debugfs_hspi_report(struct seq_file *s, void *data)
 {
@@ -582,14 +624,14 @@ static int nrc_debugfs_hspi_report(struct seq_file *s, void *data)
 		seq_printf(s, "   => Total transferred bytes (No.3 + No.4): %llu bytes\n\n", t = (unsigned long long)(tx + rx));
 		seq_printf(s, "5. First frame transmit time: %llu us\n", tx_time_first);
 		seq_printf(s, "6. Last frame transmit time: %llu us\n", tx_time_last);
-		seq_printf(s, "   (diff: %lu us)\n", (unsigned long)TIMESTAMP_SUB(tx_time_last, tx_time_first));
+		seq_printf(s, "   (diff: %llu us)\n", tx_time_last - tx_time_first);
 		seq_printf(s, "7. First frame received time: %llu us\n", rcv_time_first);
 		seq_printf(s, "8. Last frame received time: %llu us\n", rcv_time_last);
-		seq_printf(s, "   (diff: %lu us)\n", (unsigned long)TIMESTAMP_SUB(rcv_time_last, rcv_time_first));
+		seq_printf(s, "   (diff: %llu us)\n", rcv_time_last - rcv_time_first);
 		seq_printf(s, "   --------------------------------------------\n");
-		seq_printf(s, "   => First frame RTT (No.7 - No.5) : %lu us\n", (unsigned long)TIMESTAMP_SUB(rcv_time_first, tx_time_first));
-		seq_printf(s, "   => Last frame RTT (No.8 - No.6) : %lu us\n", (unsigned long)TIMESTAMP_SUB(rcv_time_last, tx_time_last));
-		seq_printf(s, "   => Time diff (No.8 - No.5) : %lu us\n", diff = (unsigned long)TIMESTAMP_SUB(rcv_time_last, tx_time_first));
+		seq_printf(s, "   => First frame RTT (No.7 - No.5) : %llu us\n", rcv_time_first - tx_time_first);
+		seq_printf(s, "   => Last frame RTT (No.8 - No.6) : %llu us\n", rcv_time_last - tx_time_last);
+		seq_printf(s, "   => Time diff (No.8 - No.5) : %lu us\n", diff = rcv_time_last - tx_time_first);
 		t *= 7812; // 8(bit) / 1024(kbit) * 1000000(sec) = 7812.5
 		seq_printf(s, "   => Throughput: %llu kbps\n", div_u64(t, diff));
 	} else if (lb_subtype == LOOPBACK_MODE_TX_ONLY) {
@@ -597,7 +639,7 @@ static int nrc_debugfs_hspi_report(struct seq_file *s, void *data)
 		seq_printf(s, "3. Total tx bytes (HOST -> TARGET): %lld bytes\n\n", t = (lb_count - 1) * slots * TX_SLOT_SIZE);
 		seq_printf(s, "4. First frame transmit time: %llu us\n", tx_time_first);
 		seq_printf(s, "5. Last frame transmit time: %llu us\n", tx_time_last);
-		seq_printf(s, "   (diff: %lu us)\n", (unsigned long)TIMESTAMP_SUB(tx_time_last, tx_time_first));
+		seq_printf(s, "   (diff: %llu us)\n", tx_time_last - tx_time_first);
 		seq_printf(s, "6. First frame arrival time(TSF in target): %u us\n", arv_time_first);
 		seq_printf(s, "7. Last frame arrival time(TSF in target): %u us\n", arv_time_last);
 		seq_printf(s, "   (diff: %lu us)\n", diff = (arv_time_last - arv_time_first));
@@ -610,7 +652,7 @@ static int nrc_debugfs_hspi_report(struct seq_file *s, void *data)
 		seq_printf(s, "3. Total rx bytes (TARGET -> HOST): %lld bytes\n\n", t = (lb_count - 1) * rl);
 		seq_printf(s, "7. First frame received time: %llu us\n", rcv_time_first);
 		seq_printf(s, "8. Last frame received time: %llu us\n", rcv_time_last);
-		seq_printf(s, "   (diff: %lu us)\n", diff = (unsigned long)TIMESTAMP_SUB(rcv_time_last, rcv_time_first));
+		seq_printf(s, "   (diff: %lu us)\n", diff = rcv_time_last - rcv_time_first);
 		seq_printf(s, "   --------------------------------------------\n");
 		t *= 7812; // 8(bit) / 1024(kbit) * 1000000(sec) = 7812.5
 		seq_printf(s, "   => Throughput: %llu kbps\n", div_u64(t, diff));
@@ -639,7 +681,7 @@ static int nrc_debugfs_hspi_report(struct seq_file *s, void *data)
 					if (c == bunch) {
 						if (bunch == 1) {
 							if (LB_INFO(i) == i) {
-								seq_printf(s, "[%5d] \t%lld \t%ld \t%lld \t%ld\n", i,
+								seq_printf(s, "[%5d] \t%lld \t%lld \t%lld \t%lld\n", i,
 									LB_INFO(txt), LB_SUB(txt), LB_INFO(rxt), LB_SUB(rxt));
 							} else {
 								seq_printf(s, "[----] this frame might be lost.\n");
@@ -681,13 +723,14 @@ void nrc_init_debugfs(struct nrc *nw)
 
 	nw->debugfs = nw->hw->wiphy->debugfsdir;
 
-	nrc_debugfs_create_file("debug", &nrc_debugfs_debug_fops);
-	nrc_debugfs_create_file("cspi", &nrc_debugfs_cspi);
-	nrc_debugfs_create_file("hif", &nrc_debugfs_hif);
-	nrc_debugfs_create_file("wakeup", &nrc_debugfs_wakeup_device);
-	nrc_debugfs_create_file("reset", &nrc_debugfs_reset_device);
-	nrc_debugfs_create_file("snr", &nrc_debugfs_snr);
-	nrc_debugfs_create_file("rssi", &nrc_debugfs_rssi);
+	nrc_debugfs_create_file("nrc_credit", &nrc_debugfs_txq_fops);
+	nrc_debugfs_create_file("nrc_debug", &nrc_debugfs_debug_fops);
+	nrc_debugfs_create_file("nrc_cspi", &nrc_debugfs_cspi);
+	nrc_debugfs_create_file("nrc_hif", &nrc_debugfs_hif);
+	nrc_debugfs_create_file("nrc_wakeup", &nrc_debugfs_wakeup_device);
+	nrc_debugfs_create_file("nrc_reset", &nrc_debugfs_reset_device);
+	nrc_debugfs_create_file("nrc_snr", &nrc_debugfs_snr);
+	nrc_debugfs_create_file("nrc_rssi", &nrc_debugfs_rssi);
 	//nrc_debugfs_create_file("pm", &nrc_debugfs_pm);
 
 #if defined(DEBUG)

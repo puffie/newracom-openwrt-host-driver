@@ -16,8 +16,13 @@
 #ifndef _NRC_INIT_H_
 #define _NRC_INIT_H_
 
+#include "nrc-hif.h"
+
+#define NRC_DRIVER_NAME "nrc80211"
+
 struct nrc_test_ops;
 struct nrc_uart_priv;
+#if 0
 #include "nrc_monitor_rx.h"
 
 struct nrc_monitor {
@@ -25,5 +30,11 @@ struct nrc_monitor {
 	struct wireless_dev *wdev;
 	struct nrc_monitor_rx_priv rx_priv;
 };
+#endif
 
+struct nrc *nrc_nw_alloc (struct device *dev, struct nrc_hif_device *hdev);
+void nrc_nw_free(struct nrc *nw);
+int nrc_nw_start (struct nrc *nw);
+int nrc_nw_stop (struct nrc *nw);
+int nrc_nw_set_model_conf (struct nrc *nw, u16 chip_id);
 #endif

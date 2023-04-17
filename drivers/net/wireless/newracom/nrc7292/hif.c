@@ -16,9 +16,10 @@
 
 #include <net/mac80211.h>
 #include <linux/gpio.h>
+#include <linux/ip.h>
+#include <linux/tcp.h>
 
 #include "nrc-hif.h"
-#include "nrc-recovery.h"
 #include "nrc-build-config.h"
 
 #if defined(CONFIG_NRC_HIF_SSP)
@@ -43,47 +44,47 @@
 #endif
 
 #define to_nw(dev)	((dev)->nw)
+#define WLAN_FC_GET_TYPE(fc)	(((fc) & 0x000c) >> 2)
+#define WLAN_FC_GET_STYPE(fc)	(((fc) & 0x00f0) >> 4)
+#define IS_ARP(skb)	(skb->protocol == htons(ETH_P_ARP))
 
 static void nrc_hif_work(struct work_struct *work);
 static void nrc_hif_ps_work(struct work_struct *work);
 static int hif_receive_skb(struct nrc_hif_device *dev, struct sk_buff *skb);
 
-struct nrc_hif_device *nrc_hif_init(struct nrc *nw)
+struct nrc_hif_device *nrc_hif_alloc (struct device *dev, void *priv, struct nrc_hif_ops *ops)
 {
-	struct nrc_hif_device *dev = NULL;
-	int i;
+    struct nrc_hif_device *hdev;
+    int i;
 
-#if defined(CONFIG_NRC_HIF_SSP)
-	dev = nrc_hif_ssp_init();
-#elif defined(CONFIG_NRC_HIF_UART)
-	dev = nrc_hif_uart_init();
-#elif defined(CONFIG_NRC_HIF_DEBUG)
-	dev = nrc_hif_debug_init();
-#elif defined(CONFIG_NRC_HIF_CSPI)
-	dev = nrc_hif_cspi_init();
-#elif defined(CONFIG_NRC_HIF_SDIO)
-	dev = nrc_hif_sdio_init();
-#endif
-	if (!dev)
-		goto out;
-
-	dev->nw = nw;
-	dev->suspended = false;
+    hdev = kzalloc(sizeof(*hdev), GFP_KERNEL);
+    if (!hdev) {
+        return NULL;
+    }
 
 	/* Initialize wim and frame queue */
-	for (i = 0; i < ARRAY_SIZE(dev->queue); i++)
-		skb_queue_head_init(&dev->queue[i]);
+    for (i = 0; i < ARRAY_SIZE(hdev->queue); i++) {
+        skb_queue_head_init(&hdev->queue[i]);
+    }
 
-	INIT_WORK(&dev->work, nrc_hif_work);
-	INIT_WORK(&dev->ps_work, nrc_hif_ps_work);
+    INIT_WORK(&hdev->work, nrc_hif_work);
+    INIT_WORK(&hdev->ps_work, nrc_hif_ps_work); 
 
-	dev->hif_ops->receive = hif_receive_skb;
+    hdev->hif_ops = ops;
+    hdev->priv = priv;
+    hdev->dev = dev;
+    hdev->hif_ops->receive = hif_receive_skb;
 
-	nrc_hif_start(dev);
-
-out:
-	return dev;
+    return hdev;
 }
+
+void nrc_hif_free (struct nrc_hif_device *hdev)
+{
+    //nrc_hif_stop(hdev);
+
+    kfree(hdev);
+}
+
 
 void nrc_hif_free_skb(struct nrc *nw, struct sk_buff *skb)
 {
@@ -91,6 +92,7 @@ void nrc_hif_free_skb(struct nrc *nw, struct sk_buff *skb)
 	struct frame_hdr *fh = (struct frame_hdr *)(hif + 1);
 	bool ack = true;
 	int credit;
+	struct ieee80211_hdr *mh;
 
 	if (hif->type == HIF_TYPE_FRAME) {
 		struct ieee80211_tx_info *txi = IEEE80211_SKB_CB(skb);
@@ -112,8 +114,27 @@ void nrc_hif_free_skb(struct nrc *nw, struct sk_buff *skb)
 
 		ieee80211_tx_status_irqsafe(nw->hw, skb);
 #ifdef CONFIG_USE_TXQ
+#if 0
 		nrc_kick_txq(nw->hw);
 #endif
+#endif
+
+		mh = (struct ieee80211_hdr *)skb->data;
+		if (ieee80211_is_assoc_resp(mh->frame_control) ||
+			ieee80211_is_reassoc_resp(mh->frame_control)) {
+			struct ieee80211_mgmt *mgmt = (struct ieee80211_mgmt *)skb->data;
+			if (mgmt->u.assoc_resp.status_code == 51) { // DENIED_LISTEN_INTERVAL_TOO_LARGE
+				struct sk_buff *skb_deauth;
+				/* Pretend to receive a deauth from @sta */
+				skb_deauth = ieee80211_deauth_get(nw->hw, mgmt->bssid, mgmt->da, mgmt->bssid, WLAN_REASON_DEAUTH_LEAVING, NULL, false);
+				if (!skb_deauth) {
+					nrc_dbg(NRC_DBG_STATE, "%s Fail to alloc skb", __func__);
+					return;
+				}
+				ieee80211_rx_irqsafe(nw->hw, skb_deauth);
+			}
+		}
+
 		return;
 	}
 
@@ -198,6 +219,16 @@ static void nrc_hif_work(struct work_struct *work)
 					}
 				}	
 			} else { // Frame
+				/*
+				 * UDP packets can reach here continuously
+				 * without checking credit and then it makes infinite loop.
+				 * Here is the workaround to give priority for WIM command.
+				 */
+				if (!skb_queue_empty(&hdev->queue[1])) {
+					queue_work(nw->workqueue, &hdev->work);
+					break;
+				}
+
 				if (skb_frame) {
 					skb = skb_frame;
 					skb_frame = NULL;
@@ -249,14 +280,13 @@ static void nrc_hif_ps_work(struct work_struct *work)
 	struct nrc_hif_device *hdev;
 	struct wim_pm_param *p;
 	struct sk_buff *skb;
-	struct nrc_txq *ntxq;
-	int i, ret = 0;
+	int ret = 0;
 
 	hdev = container_of(work, struct nrc_hif_device, ps_work);
 	nw = to_nw(hdev);
 
 	if (nw->ps_enabled) {
-		if (nw->drv_state == NRC_DRV_PS) {
+		if (nw->drv_state == NRC_DRV_PS || nw->ps_modem_enabled) {
 			/*
 			 * if the current state is already NRC_DRV_PS,
 			 * there's nothing to do in here even if mac80211 notifies wake-up.
@@ -264,51 +294,61 @@ static void nrc_hif_ps_work(struct work_struct *work)
 			 * nrc_wake_tx_queue() with changing gpio signal.
 			 * (when driver receives a data frame.)
 			 */
-			nrc_ps_dbg("Target is already in deepsleep...\n");
+			nrc_ps_dbg("Target is already in power save mode...\n");
 			return;
 		}
-		skb = nrc_wim_alloc_skb(nw, WIM_CMD_SET, WIM_MAX_SIZE);
+
+		skb = nrc_wim_alloc_skb(nw, WIM_CMD_SET,
+				tlv_len(sizeof(struct wim_pm_param)));
 		p = nrc_wim_skb_add_tlv(skb, WIM_TLV_PS_ENABLE,
 				sizeof(struct wim_pm_param), NULL);
 		memset(p, 0, sizeof(struct wim_pm_param));
 		p->ps_mode = power_save;
 		p->ps_enable = true;
-		p->ps_wakeup_pin = TARGET_GPIO_FOR_WAKEUP;
 		nw->ps_drv_state = nw->ps_enabled;
+		p->ps_timeout = nw->hw->conf.dynamic_ps_timeout;
 
 		if (power_save >= NRC_PS_DEEPSLEEP_TIM) {
+			if (!disable_cqm) {
+				try_to_del_timer_sync(&nw->bcn_mon_timer);
+			}
+			p->ps_wakeup_pin = power_save_gpio[1];
 			p->ps_duration = (uint64_t) sleep_duration[0] * (sleep_duration[1] ? 1000 : 1);
 			ieee80211_stop_queues(nw->hw);
-			for (i = 0; i < NRC_QUEUE_MAX; i++) {
-				ntxq = &nw->ntxq[i];
-				skb_queue_purge(&ntxq->queue);
-#ifdef CONFIG_CHECK_DATA_SIZE
-				ntxq->data_size = 0;
+#ifdef CONFIG_USE_TXQ
+			nrc_cleanup_txq_all(nw);
 #endif
-			}
-			nrc_ps_dbg("Enter DEEPSLEEP!!!\n");
+			nrc_ps_dbg("Enter DEEPSLEEP2!!!\n");
 			nrc_ps_dbg("sleep_duration: %lld ms\n", p->ps_duration);
+
 		} else {
 			nrc_ps_dbg("Enter MODEMSLEEP!!!\n");
 		}
 
-		gpio_set_value(RPI_GPIO_FOR_PS, 0);
-		nrc_hif_suspend_rx_thread(nw->hif);
+		nrc_hif_sleep_target_start(nw->hif, power_save);
+
 		ret = nrc_xmit_wim_request(nw, skb);
-		if (power_save >= NRC_PS_DEEPSLEEP_TIM &&
-			(nw->drv_state != NRC_DRV_PS)) {
+
+		if (power_save == NRC_PS_MODEMSLEEP) {
+			nw->ps_modem_enabled = true;
+		} else if (power_save >= NRC_PS_DEEPSLEEP_TIM) {
 			nrc_hif_suspend(nw->hif);
-			msleep(100);
+#if 0 /* not work to ieee80211_stop_queues */
+			nrc_ps_dbg("sleep before\n");
+			usleep_range(200 * 1000, 300 * 1000);
+			nrc_ps_dbg("sleep after\n");
+#endif
+			ieee80211_wake_queues(nw->hw);
 		}
-		nrc_hif_resume_rx_thread(nw->hif);
-		ieee80211_wake_queues(nw->hw);
+		nrc_hif_sleep_target_end(nw->hif, power_save);
 	}
 }
 
 #if defined (CONFIG_TXQ_ORDER_CHANGE_NRC_DRV)
-/**************************************************************************//**
+/*******************************************************************************
 * FunctionName : is_tcp_ack
-* Description : Check if the skb is a tcp ack frame (the relative sequence number of tcp ack is 1 )
+* Description : Check if the skb is a tcp ack frame 
+*               (the relative sequence number of tcp ack is 1 )
 * Parameters : skb(socket buffer)
 * Returns : T/F (bool) T:TCP ACK, F:not TCP ACK
 *******************************************************************************/
@@ -324,20 +364,53 @@ bool is_tcp_ack(struct sk_buff *skb)
 	u8 *p;
 	p = (u8*)skb->data;
 	hif = (void*)p;
-	mhdr = (void*)(p+sizeof(struct hif)+ sizeof(struct frame_hdr));
 
-	if (ieee80211_is_data(mhdr->frame_control)){
-		if ((ip_header->protocol == IPPROTO_TCP) && (tcp_header->syn) && (tcp_header->ack)){
+	if (hif->type != HIF_TYPE_FRAME)
+		return false;
+
+	mhdr = (void*)(p + sizeof(struct hif) + sizeof(struct frame_hdr));
+
+	if (ieee80211_is_data(mhdr->frame_control)) {
+		if ((ip_header->protocol == IPPROTO_TCP) &&
+			(tcp_header->syn) && (tcp_header->ack)) {
 			raw_seq_num = ntohl (tcp_header->seq);
 		}
-		if ((ip_header->protocol == IPPROTO_TCP) && (tcp_header->ack) && ((ntohl(tcp_header->seq) - raw_seq_num) == 1)) {
+		if ((ip_header->protocol == IPPROTO_TCP) && (tcp_header->ack) &&
+			((ntohl(tcp_header->seq) - raw_seq_num) == 1)) {
 			return true;
 		}
 	}
+
 	return false;
 }
 
-/**************************************************************************//**
+/*******************************************************************************
+* FunctionName : is_mgmt
+* Description : Check if the skb is a management frame 
+* Parameters : skb(socket buffer)
+* Returns : T/F (bool) T:management frame, F:not management frame
+*******************************************************************************/
+bool is_mgmt(struct sk_buff *skb)
+{
+	struct hif *hif;
+	struct ieee80211_hdr *mhdr;
+
+	u8 *p;
+	p = (u8*)skb->data;
+	hif = (void*)p;
+
+	if (hif->type != HIF_TYPE_FRAME)
+		return false;
+
+	mhdr = (void*)(p + sizeof(struct hif) + sizeof(struct frame_hdr));
+
+	if (ieee80211_is_mgmt(mhdr->frame_control))
+		return true;
+
+	return false;
+}
+
+/*******************************************************************************
 * FunctionName : is_urgent_frame
 * Description : Check if the frame is urgent
 * Parameters : skb(socket buffer)
@@ -346,13 +419,17 @@ bool is_tcp_ack(struct sk_buff *skb)
 bool is_urgent_frame(struct sk_buff *skb)
 {
 	bool ret = false;
-	if (is_tcp_ack(skb)){
+	if (is_mgmt(skb))
 		ret = true;
-	}
+	/*
+	 * add other conditions for checking urgent frame. 
+	 * else if (is_tcp_ack(skb)) {...}
+	 */
 	return ret;
 }
-
-/**************************************************************************//**
+#if 0
+#error "If you enable this, consider new feature of 7393 that supports vif1"
+/*******************************************************************************
 * FunctionName : skb_change_ac
 * Description : force change the access category of the skb
 * Parameters : nw, skb, ac(aceess category want to change)
@@ -369,6 +446,10 @@ int skb_change_ac(struct nrc *nw, struct sk_buff *skb, uint8_t ac)
 	u8 *p;
 	p = (u8*)skb->data;
 	hif = (void*)p;
+	if (hif->type != HIF_TYPE_FRAME) {
+		return -1;
+	}
+
 	fh = (void*)(p+sizeof(struct hif));
 
 	if (ac>3)
@@ -383,6 +464,7 @@ int skb_change_ac(struct nrc *nw, struct sk_buff *skb, uint8_t ac)
 	return 0;
 }
 #endif
+#endif /* defined(CONFIG_TXQ_ORDER_CHANGE_NRC_DRV) */
 
 static int nrc_hif_enqueue_skb(struct nrc *nw, struct sk_buff *skb)
 {
@@ -404,18 +486,20 @@ static int nrc_hif_enqueue_skb(struct nrc *nw, struct sk_buff *skb)
 	}
 
 #if defined (CONFIG_TXQ_ORDER_CHANGE_NRC_DRV)
-	if (is_urgent_frame(skb)) {
-		// Change AC to  -  0: AC_BK, 1: AC_BE, 2: AC_VI, 3: AC_VO
-		// return -1 when AC is not changed (4: Beacon , 5: GP)
-		if (skb_change_ac(nw, skb, 3) < 0) {
-			//Case 1: change nothing.
-			skb_queue_tail(&hdev->queue[hif->type], skb);
-		} else {
-			//Case 2: AC is changed and enqueue to the head
-			skb_queue_head(&hdev->queue[hif->type], skb);
-			//Case 3: AC is changed and enqueue to the tail
-			//skb_queue_tail(&hdev->queue[hif->type], skb);
-		}
+	if (nw->drv_state == NRC_DRV_RUNNING && is_urgent_frame(skb)) {
+		/*
+		 * Case 1: enqueue to the head
+		 */
+		skb_queue_head(&hdev->queue[hif->type], skb);
+
+		/*
+		 * Case 2: change AC
+		 */
+		// skb_change_ac(nw, skb, 3);
+
+		/*
+		 * Case 3: change AC and enqueue to the tail
+		 */
 	} else {
 		if (hif->type == HIF_TYPE_LOOPBACK) {
 			skb_queue_tail(&hdev->queue[HIF_TYPE_WIM], skb);
@@ -432,7 +516,7 @@ static int nrc_hif_enqueue_skb(struct nrc *nw, struct sk_buff *skb)
 	} else {
 		skb_queue_tail(&hdev->queue[hif->type], skb);
 	}
-#endif
+#endif /* defined(CONFIG_TXQ_ORDER_CHANGE_NRC_DRV) */
 
 	if (nw->workqueue == NULL) {
 		return -1;
@@ -453,7 +537,8 @@ int nrc_xmit_wim(struct nrc *nw, struct sk_buff *skb, enum HIF_SUBTYPE stype)
 	int len = skb->len;
 	int ret = 0;
 
-	if ((nw->drv_state == NRC_DRV_PS) && atomic_read(&nw->d_deauth.delayed_deauth)) {
+	if ((nw->drv_state == NRC_DRV_PS) &&
+		atomic_read(&nw->d_deauth.delayed_deauth)) {
 		dev_kfree_skb(skb);
 		return 0;
 	}
@@ -522,8 +607,8 @@ int nrc_xmit_wim_response(struct nrc *nw, struct sk_buff *skb)
  *
  */
 static u32 nrc_skb_append_tx_info(struct nrc *nw, u16 aid,
-		   struct sk_buff *skb,
-		   bool frame_injection)
+		struct sk_buff *skb,
+		bool frame_injection)
 {
 	struct ieee80211_tx_info *txi = IEEE80211_SKB_CB(skb);
 	struct frame_tx_info_param *p;
@@ -561,9 +646,9 @@ static u32 nrc_skb_append_tx_info(struct nrc *nw, u16 aid,
  * nrc_xmit_injected_frame - transmit a injected 802.11 frame
  */
 int nrc_xmit_injected_frame(struct nrc *nw,
-		   struct ieee80211_vif *vif,
-		   struct ieee80211_sta *sta,
-		   struct sk_buff *skb)
+			struct ieee80211_vif *vif,
+			struct ieee80211_sta *sta,
+			struct sk_buff *skb)
 {
 	struct ieee80211_hdr *hdr = (void *)skb->data;
 	struct frame_hdr *fh;
@@ -594,13 +679,10 @@ int nrc_xmit_injected_frame(struct nrc *nw,
 		hif->subtype = HIF_FRAME_SUB_DATA_BE;
 	} else if (ieee80211_is_mgmt(fc)) {
 		hif->subtype = HIF_FRAME_SUB_MGMT;
-		if(enable_usn)
-			fh->flags.tx.ac = (hif->vifindex == 0 ? 1 : 7);
-		else
-			fh->flags.tx.ac = (hif->vifindex == 0 ? 3 : 9);
+		fh->flags.tx.ac = (hif->vifindex == 0 ? 3 : (nw->hw_queues < 7 ? 5 : 9));
 	} else if (ieee80211_is_ctl(fc)) {
 		hif->subtype = HIF_FRAME_SUB_CTRL;
-		fh->flags.tx.ac = (hif->vifindex == 0 ? 3 : 9);
+		fh->flags.tx.ac = (hif->vifindex == 0 ? 3 : (nw->hw_queues < 7 ? 5 : 9));
 	} else {
 		WARN_ON(true);
 	}
@@ -623,7 +705,7 @@ int nrc_xmit_injected_frame(struct nrc *nw,
  * nrc_xmit_frame - transmit a 802.11 frame
  */
 int nrc_xmit_frame(struct nrc *nw, s8 vif_index, u16 aid,
-		   struct sk_buff *skb)
+		struct sk_buff *skb)
 {
 	struct ieee80211_hdr *hdr = (void *)skb->data;
 	struct frame_hdr *fh;
@@ -662,6 +744,23 @@ int nrc_xmit_frame(struct nrc *nw, s8 vif_index, u16 aid,
 			crypto_tail_len = IEEE80211_CCMP_256_MIC_LEN;
 			break;
 #endif
+#ifdef CONFIG_SUPPORT_GCMP
+		case WLAN_CIPHER_SUITE_GCMP:
+			crypto_tail_len = IEEE80211_GCMP_MIC_LEN;
+			break;
+		case WLAN_CIPHER_SUITE_GCMP_256:
+		    crypto_tail_len = IEEE80211_GCMP_MIC_LEN;
+		    break;
+#endif
+#ifdef CONFIG_SUPPORT_GMAC
+		case WLAN_CIPHER_SUITE_BIP_GMAC_128:
+			crypto_tail_len = IEEE80211_GMAC_PN_LEN;
+			break;
+		case WLAN_CIPHER_SUITE_BIP_GMAC_256:
+			crypto_tail_len = IEEE80211_GMAC_PN_LEN;
+			break;
+#endif
+
 		default:
 			nrc_dbg(NRC_DBG_MAC,
 				"%s: Unknown cipher detected.(%d)"
@@ -710,33 +809,25 @@ int nrc_xmit_frame(struct nrc *nw, s8 vif_index, u16 aid,
 	if (ieee80211_is_data(fc)) {
 		hif->subtype = HIF_FRAME_SUB_DATA_BE;
 		/* temporarily use a BE hw_queue instead of the invalid value. */
-		if (fh->flags.tx.ac > 9) {
-			nrc_dbg(NRC_DBG_TX, "%s vif(%d): Invaid ac(%d) from mac80211\n",
-				__func__, hif->vifindex, fh->flags.tx.ac);
-			fh->flags.tx.ac = (hif->vifindex == 0 ? 1 : 7);
-		}
 	} else if (ieee80211_is_mgmt(fc)) {
 		hif->subtype = HIF_FRAME_SUB_MGMT;
-		if(enable_usn)
-			fh->flags.tx.ac = (hif->vifindex == 0 ? 1 : 7);
-		else
-			fh->flags.tx.ac = (hif->vifindex == 0 ? 3 : 9);
+		fh->flags.tx.ac = (hif->vifindex == 0 ? 3 : (nw->hw_queues < 7 ? 5 : 9));
 	} else if (ieee80211_is_ctl(fc)) {
 		hif->subtype = HIF_FRAME_SUB_CTRL;
-		fh->flags.tx.ac = (hif->vifindex == 0 ? 3 : 9);
+		fh->flags.tx.ac = (hif->vifindex == 0 ? 3 : (nw->hw_queues < 7 ? 5 : 9));
 	} else {
 		WARN_ON(true);
 	}
 
-    if (nullfunc_enable) {
-        if (ieee80211_is_pspoll(fc)) {
-            print_hex_dump(KERN_DEBUG, "tx ps-poll ", DUMP_PREFIX_NONE, 16, 1,
-                    fh, 20, false);
-        }
-    }
+	if (nullfunc_enable) {
+		if (ieee80211_is_pspoll(fc)) {
+			print_hex_dump(KERN_DEBUG, "tx ps-poll ", DUMP_PREFIX_NONE, 16, 1,
+				fh, 20, false);
+		}
+	}
 #if defined(CONFIG_NRC_HIF_PRINT_TX_DATA)
 	print_hex_dump(KERN_DEBUG, "frame: ", DUMP_PREFIX_NONE, 16, 1,
-		       skb->data, skb->len, false);
+		skb->data, skb->len, false);
 #endif
 	credit = DIV_ROUND_UP(skb->len, nw->fwinfo.buffer_size);
 #ifdef CONFIG_NRC_HIF_PRINT_FLOW_CONTROL
@@ -745,6 +836,14 @@ int nrc_xmit_frame(struct nrc *nw, s8 vif_index, u16 aid,
 			atomic_read(&nw->tx_pend[fh->flags.tx.ac]), credit);
 #endif
 	atomic_add(credit, &nw->tx_pend[fh->flags.tx.ac]);
+
+#if NRC_DBG_PRINT_ARP_FRAME
+	if (IS_ARP(skb)) {
+		nrc_ps_dbg("[%s] TX ARP [type:%d sype:%d, protected:%d, len:%d] [vif:%d, ac:%d]",
+			__func__, WLAN_FC_GET_TYPE(fc), WLAN_FC_GET_STYPE(fc),
+			ieee80211_has_protected(fc), skb->len, vif_index, fh->flags.tx.ac);
+	}
+#endif
 
 	if (!nw->loopback)
 		ret = nrc_hif_enqueue_skb(nw, skb);
@@ -874,7 +973,7 @@ static int hif_receive_skb(struct nrc_hif_device *dev, struct sk_buff *skb)
 		}
 		if (hif_new->index == 0) {
 			rcv_time_first = rcv_time_last;
-			pr_err("[Loopback Test] First frame received time: %llu\n", rcv_time_first);
+			pr_err("[Loopback Test] First frame received time: %llu", rcv_time_first);
 		}
 
 		if (hif_new->subtype == LOOPBACK_MODE_TX_ONLY) {
@@ -914,6 +1013,68 @@ static int hif_receive_skb(struct nrc_hif_device *dev, struct sk_buff *skb)
 	}
 	return 0;
 }
+
+
+#define TARGET_MAX_TIME_TO_FALL_ASLEEP		550 /* ms */
+
+void nrc_hif_wake_target (struct nrc_hif_device *dev)
+{
+#if defined(CONFIG_DELAY_WAKE_TARGET)
+	ktime_t cur_time, elapsed;
+	unsigned int elapsed_msecs;
+
+	cur_time = ktime_get_boottime();
+	elapsed = ktime_sub(cur_time, dev->ps_time);
+	elapsed_msecs = ktime_to_ms(elapsed);
+
+	if (elapsed_msecs < TARGET_MAX_TIME_TO_FALL_ASLEEP) { /* need more time */
+		nrc_ps_dbg("%u mdelay", TARGET_MAX_TIME_TO_FALL_ASLEEP - elapsed_msecs);
+		mdelay(TARGET_MAX_TIME_TO_FALL_ASLEEP - elapsed_msecs);
+	} else {
+		nrc_ps_dbg("Nothing to do, %u", elapsed_msecs);
+	}
+#endif
+	
+	gpio_set_value(power_save_gpio[0], 1);
+	nrc_ps_dbg("Set GPIO high for wakeup");
+}
+
+void nrc_hif_sleep_target_prepare (struct nrc_hif_device *dev, int mode)
+{
+	nrc_ps_dbg("Set GPIO low for sleep");
+	gpio_set_value(power_save_gpio[0], 0);
+}
+
+void nrc_hif_sleep_target_start (struct nrc_hif_device *dev, int mode)
+{
+	switch (mode) {
+		case NRC_PS_NONE:
+			break;
+		case NRC_PS_MODEMSLEEP:
+			break;
+		case NRC_PS_DEEPSLEEP_TIM:
+		case NRC_PS_DEEPSLEEP_NONTIM:
+			nrc_hif_sleep_target_prepare(dev, mode);
+			break;
+		default:
+			break;
+	}
+	nrc_hif_suspend_rx_thread(dev); /* To avoid garbage WARNING issue */
+
+#if defined(CONFIG_DELAY_WAKE_TARGET)
+	dev->ps_time = ktime_get_boottime();
+#endif
+}
+
+void nrc_hif_sleep_target_end (struct nrc_hif_device *dev, int mode)
+{
+	nrc_hif_resume_rx_thread(dev);
+
+#if defined(CONFIG_DELAY_WAKE_TARGET)
+	//dev->ps_time = ktime_get_boottime();
+#endif
+}
+
 
 int nrc_hif_wakeup_device(struct nrc_hif_device *dev)
 {
@@ -995,45 +1156,3 @@ int nrc_hif_close(struct nrc_hif_device *dev)
 	return 0;
 }
 
-int nrc_hif_exit(struct nrc_hif_device *dev)
-{
-	struct nrc *nw;
-	struct nrc_txq *ntxq;
-	int i;
-
-	if (dev == NULL)
-		return 0;
-
-	nw = to_nw(dev);
-
-	BUG_ON(dev == NULL);
-	BUG_ON(nw == NULL);
-
-	for (i = 0; i < NRC_QUEUE_MAX; i++) {
-		ntxq = &nw->ntxq[i];
-		skb_queue_purge(&ntxq->queue);
-#ifdef CONFIG_CHECK_DATA_SIZE
-		ntxq->data_size = 0;
-#endif
-	}
-
-	if (nw->workqueue != NULL)
-		flush_work(&dev->work);
-
-	nrc_hif_stop(dev);
-	nrc_hif_cleanup(dev);
-
-#if defined(CONFIG_NRC_HIF_SSP)
-	return nrc_hif_ssp_exit(dev);
-#elif defined(CONFIG_NRC_HIF_UART)
-	return nrc_hif_uart_exit(dev);
-#elif defined(CONFIG_NRC_HIF_DEBUG)
-	return nrc_hif_debug_exit(dev);
-#elif defined(CONFIG_NRC_HIF_CSPI)
-	return nrc_hif_cspi_exit(dev);
-#elif defined(CONFIG_NRC_HIF_SDIO)
-	return nrc_hif_sdio_exit(dev);
-#else
-	return 0;
-#endif
-}

@@ -16,6 +16,8 @@
 #ifndef _NRC_STATS_H_
 #define _NRC_STATS_H_
 
+#define MAX_SHOWN_RSSI		(-10)
+
 struct stats_sta {
 	uint8_t macaddr[6];
 	struct moving_average *snr;
@@ -43,6 +45,6 @@ int nrc_stats_update(uint8_t *macaddr, int8_t snr, int8_t rssi);
 int nrc_stats_add(uint8_t *macaddr, int count);
 int nrc_stats_del(uint8_t *macaddr);
 void nrc_stats_print(void);
-int nrc_stats_report(uint8_t *output, int index, int number);
+int nrc_stats_report(struct nrc* nw, uint8_t *output, int index, int number);
 int nrc_stats_report_count(void);
 #endif

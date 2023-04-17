@@ -21,6 +21,7 @@
 #include <linux/platform_device.h>
 #include <linux/gpio.h>
 #include "nrc.h"
+#include "nrc-init.h"
 #include "nrc-hif.h"
 #include "nrc-debug.h"
 #include "nrc-mac80211.h"
@@ -28,7 +29,6 @@
 #include "nrc-netlink.h"
 #include "nrc-stats.h"
 #include "wim.h"
-#include "nrc-recovery.h"
 #include "nrc-vendor.h"
 #if defined(CONFIG_SUPPORT_BD)
 #include <linux/kernel.h>
@@ -64,33 +64,40 @@ char *hifport = "/dev/ttyUSB0";
 module_param(hifport, charp, 0600);
 MODULE_PARM_DESC(hifport, "HIF port device name");
 
-/* default port speed */
-#ifdef CONFIG_SUPPORT_MT76x8
-#ifdef CONFIG_SUPPORT_JMP
-int hifspeed = (20*1000*1000);
-#else
+/**
+ * default port speed
+ */
+#if defined(CONFIG_NRC_HIF_CSPI)
+#ifdef CONFIG_SPI_HALF_DUPLEX
 int hifspeed = (12*1000*1000);
-#endif
 #else
 int hifspeed = (20*1000*1000);
 #endif
 
+#elif defined(CONFIG_NRC_HIF_SSP)
+int hifspeed = (1300*1000);
+#elif defined(CONFIG_NRC_HIF_UART)
+int hifspeed = 115200;
+#else
+int hifspeed = 115200;
+#endif
 module_param(hifspeed, int, 0600);
 MODULE_PARM_DESC(hifspeed, "HIF port speed");
 
 int spi_bus_num;
 module_param(spi_bus_num, int, 0600);
 MODULE_PARM_DESC(spi_bus_num, "SPI controller bus number");
-#ifdef CONFIG_SUPPORT_MT76x8
+#ifdef CONFIG_SPI_HALF_DUPLEX
 int spi_cs_num = 1;
 #else
 int spi_cs_num = 0;
 #endif
 module_param(spi_cs_num, int, 0600);
 MODULE_PARM_DESC(spi_cs_num, "SPI chip select number");
-#ifdef CONFIG_SUPPORT_MT76x8
+
+#ifdef CONFIG_SPI_HALF_DUPLEX
 int spi_gpio_irq = 2;
-#else // not CONFIG_SUPPORT_MT76x8
+#else
 int spi_gpio_irq = 5;
 #endif
 module_param(spi_gpio_irq, int, 0600);
@@ -135,18 +142,25 @@ module_param(bss_max_idle_usf_format, bool, 0600);
 MODULE_PARM_DESC(bss_max_idle_usf_format, "BSS Max Idle specified in units of usf");
 
 /**
- * default enable_short_bi
+ * enable/disable the s1g short beacon
  */
 bool enable_short_bi = 1;
 module_param(enable_short_bi, bool, 0600);
 MODULE_PARM_DESC(enable_short_bi, "Enable Short Beacon Interval");
 
-/**
- * enable/disable the legacy ack mode
- */
+#if defined(CONFIG_SUPPORT_LEGACY_ACK)
+/* enable/disable the legacy ack mode */
 bool enable_legacy_ack = false;
 module_param(enable_legacy_ack, bool, 0600);
 MODULE_PARM_DESC(enable_legacy_ack, "Enable Legacy ACK mode");
+#endif /* CONFIG_SUPPORT_LEGACY_ACK */
+
+#if defined(CONFIG_SUPPORT_BEACON_BYPASS)
+/* enable/disable beacon bypass */
+bool enable_beacon_bypass = false;
+module_param(enable_beacon_bypass, bool, 0600);
+MODULE_PARM_DESC(enable_beacon_bypass, "Enable Beacon Bypass");
+#endif /* CONFIG_SUPPORT_BEACON_BYPASS */
 
 bool enable_monitor;
 module_param(enable_monitor, bool, 0600);
@@ -225,10 +239,10 @@ module_param(auto_ba, bool, 0600);
 MODULE_PARM_DESC(auto_ba, "Enable auto ba session setup on connection / QoS data Tx");
 
 /**
- * Use SW Encryption instead of HW Encryption
+ * Encryption/Decryption type for PTK/GTK (0: HW, 1: SW, 2: HW PTK, SW GTK)
  */
-bool sw_enc = false;
-module_param(sw_enc, bool, S_IRUSR | S_IWUSR);
+int sw_enc = 0;
+module_param(sw_enc, int, S_IRUSR | S_IWUSR);
 MODULE_PARM_DESC(sw_enc, "Use SW Encryption instead of HW Encryption");
 
 /**
@@ -257,7 +271,7 @@ MODULE_PARM_DESC(debug_level_all, "Driver debug level all");
  */
 int credit_ac_be = 40; //default 40
 module_param(credit_ac_be, int, 0600);
-MODULE_PARM_DESC(credit_ac_be, "credit number for AC_BE");
+MODULE_PARM_DESC(credit_ac_be, "(Test only) credit number for AC_BE");
 
 /**
  * discard TX deauth frame for Mult-STA test
@@ -267,7 +281,14 @@ module_param(discard_deauth , bool, 0600);
 MODULE_PARM_DESC(discard_deauth , "(Test only) discard TX deauth for Multi-STA test");
 
 /**
- * Use bitmap encoding for block ack
+ * Debug flow control (print TRX slot and credit status)
+ */
+bool dbg_flow_control = false;
+module_param(dbg_flow_control, bool, 0600);
+MODULE_PARM_DESC(dbg_flow_control, "Print slot and credit status");
+
+/**
+ * Use bitmap encoding for NDP (block) ack
  */
 bool bitmap_encoding = true;
 module_param(bitmap_encoding , bool, 0600);
@@ -280,6 +301,32 @@ bool reverse_scrambler = true;
 module_param(reverse_scrambler , bool, 0600);
 MODULE_PARM_DESC(reverse_scrambler , "(NRC7292 only) Apply scrambler reversely");
 
+#if defined(CONFIG_S1G_CHANNEL)
+char * nrc_country_code="!";
+module_param(nrc_country_code, charp, 0444);
+MODULE_PARM_DESC(nrc_country_code, "Two letter fw country code");
+#endif /* defined(CONFIG_S1G_CHANNEL) */
+
+/**
+ * gpio for power save (default Host_output(GP20) --> Target_input(GP11))
+ */
+int power_save_gpio[2] = {RPI_GPIO_FOR_PS, TARGET_GPIO_FOR_WAKEUP};
+module_param_array(power_save_gpio, int, NULL, 0600);
+MODULE_PARM_DESC(power_save_gpio, "gpio for power save");
+
+/**
+ * Maximum beacon loss count
+ */
+int beacon_loss_count = 7;
+module_param(beacon_loss_count, int, 0600);
+MODULE_PARM_DESC(beacon_loss_count, "Number of beacon intervals before we decide beacon was lost");
+/**
+ * Set up Halow Certification
+ */
+bool halow_cert = false;
+module_param(halow_cert, bool, 0600);
+MODULE_PARM_DESC(halow_cert, "Enable for Halow Certification");
+
 static bool has_macaddr_param(uint8_t *dev_mac)
 {
 	int res;
@@ -288,12 +335,11 @@ static bool has_macaddr_param(uint8_t *dev_mac)
 		return false;
 
 	res = sscanf(macaddr, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
-			   &dev_mac[0], &dev_mac[1], &dev_mac[2],
-			   &dev_mac[3], &dev_mac[4], &dev_mac[5]);
+				&dev_mac[0], &dev_mac[1], &dev_mac[2],
+				&dev_mac[3], &dev_mac[4], &dev_mac[5]);
 
 	return (res == 6);
 }
-
 
 static int s1g_unscaled_interval_max = 0x3fff;
 static int convert_usf(int interval)
@@ -349,11 +395,11 @@ static void nrc_set_macaddr_from_fw(struct nrc *nw, struct wim_ready *ready)
 	if (ready->v.has_macaddr[0] && ready->v.has_macaddr[1]) {
 		for (i = 0; i < NR_NRC_VIF; i++) {
 			memcpy(&nw->mac_addr[i].addr[0],
-				&ready->v.macaddr[i][0], ETH_ALEN);
+					&ready->v.macaddr[i][0], ETH_ALEN);
 		}
 	} else if (ready->v.has_macaddr[0] && !ready->v.has_macaddr[1]) {
 		memcpy(&nw->mac_addr[0].addr[0],
-			&ready->v.macaddr[0][0], ETH_ALEN);
+				&ready->v.macaddr[0][0], ETH_ALEN);
 		if (!(nw->mac_addr[0].addr[0]&0x2)) {
 			memcpy(&nw->mac_addr[1].addr[0],
 				&ready->v.macaddr[0][0], ETH_ALEN);
@@ -363,10 +409,10 @@ static void nrc_set_macaddr_from_fw(struct nrc *nw, struct wim_ready *ready)
 		}
 	} else if (!ready->v.has_macaddr[0] && ready->v.has_macaddr[1]) {
 		memcpy(&nw->mac_addr[1].addr[0],
-			&ready->v.macaddr[1][0], ETH_ALEN);
+				&ready->v.macaddr[1][0], ETH_ALEN);
 		if (!(nw->mac_addr[1].addr[0]&0x2)) {
 			memcpy(&nw->mac_addr[0].addr[0],
-				&ready->v.macaddr[1][0], ETH_ALEN);
+					&ready->v.macaddr[1][0], ETH_ALEN);
 			nw->mac_addr[0].addr[0] |= 0x2;
 		} else {
 			nw->has_macaddr[0] = false;
@@ -390,13 +436,13 @@ static void nrc_on_fw_ready(struct sk_buff *skb, struct nrc *nw)
 	nrc_dbg(NRC_DBG_HIF, "  -- type: %d", ready->h.type);
 	nrc_dbg(NRC_DBG_HIF, "  -- length: %d", ready->h.len);
 	nrc_dbg(NRC_DBG_HIF, "  -- version: 0x%08X",
-			ready->v.version);
+						ready->v.version);
 	nrc_dbg(NRC_DBG_HIF, "  -- tx_head_size: %d",
-			ready->v.tx_head_size);
+						ready->v.tx_head_size);
 	nrc_dbg(NRC_DBG_HIF, "  -- rx_head_size: %d",
-			ready->v.rx_head_size);
+						ready->v.rx_head_size);
 	nrc_dbg(NRC_DBG_HIF, "  -- payload_align: %d",
-			ready->v.payload_align);
+						ready->v.payload_align);
 	nw->fwinfo.ready = NRC_FW_ACTIVE;
 	nw->fwinfo.version = ready->v.version;
 	nw->fwinfo.rx_head_size = ready->v.rx_head_size;
@@ -404,14 +450,14 @@ static void nrc_on_fw_ready(struct sk_buff *skb, struct nrc *nw)
 	nw->fwinfo.payload_align = ready->v.payload_align;
 	nw->fwinfo.buffer_size = ready->v.buffer_size;
 	nrc_dbg(NRC_DBG_HIF, "  -- hw_version: %d",
-			ready->v.hw_version);
+						ready->v.hw_version);
 	nw->fwinfo.hw_version = ready->v.hw_version;
 	nrc_dbg(NRC_DBG_HIF, "  -- cap_mask: 0x%x",
-			ready->v.cap.cap);
+						ready->v.cap.cap);
 	nrc_dbg(NRC_DBG_HIF, "  -- cap_li: %d, %d",
-			ready->v.cap.listen_interval, listen_interval);
+						ready->v.cap.listen_interval, listen_interval);
 	nrc_dbg(NRC_DBG_HIF, "  -- cap_idle: %d, %d",
-			ready->v.cap.bss_max_idle, bss_max_idle);
+						ready->v.cap.bss_max_idle, bss_max_idle);
 
 	nw->cap.cap_mask = ready->v.cap.cap;
 	nw->cap.listen_interval = ready->v.cap.listen_interval;
@@ -431,13 +477,18 @@ static void nrc_on_fw_ready(struct sk_buff *skb, struct nrc *nw)
 	for (i = 0; i < NR_NRC_VIF; i++) {
 		if (nw->has_macaddr[i])
 			nrc_dbg(NRC_DBG_HIF, "  -- mac_addr[%d]: %pM",
-					i, nw->mac_addr[i].addr);
+								i, nw->mac_addr[i].addr);
 	}
 
 	for (i = 0; i < nw->cap.max_vif; i++) {
 		nw->cap.vif_caps[i].cap_mask = ready->v.cap.vif_caps[i].cap;
-		nrc_dbg(NRC_DBG_HIF, "  -- cap_mask[%d]: 0x%x", i,
-			ready->v.cap.vif_caps[i].cap);
+		if (sw_enc == WIM_ENCDEC_HYBRID) {
+			nw->cap.vif_caps[i].cap_mask |= WIM_SYSTEM_CAP_HYBRIDSEC;
+		} else if (sw_enc == WIM_ENCDEC_SW) {
+			nw->cap.vif_caps[i].cap_mask &= ~WIM_SYSTEM_CAP_HWSEC;
+		}
+		nrc_dbg(NRC_DBG_HIF, "  -- cap_mask[%d]: 0x%llx", i,
+							nw->cap.vif_caps[i].cap_mask);
 	}
 	/* Override with insmod parameters */
 	if (listen_interval) {
@@ -464,217 +515,34 @@ static void nrc_on_fw_ready(struct sk_buff *skb, struct nrc *nw)
 	dev_kfree_skb(skb);
 }
 
-static void nrc_check_start(struct work_struct *work)
+int nrc_fw_start(struct nrc *nw)
 {
-	struct nrc *nw = container_of(work, struct nrc, check_start.work);
-	int ret;
 	struct sk_buff *skb_req, *skb_resp;
 	struct wim_drv_info_param *p;
 
-	if (nw->drv_state == NRC_DRV_CLOSING)
-		return;
-	if (nrc_check_fw_file(nw)) {
-		if (nrc_check_boot_ready(nw)) {
-			/* ready to download fw, so kick it */
-			nw->drv_state = NRC_DRV_BOOT;
-			nrc_download_fw(nw);
-			/* check the normal fw after 3 sec. */
-			schedule_delayed_work(&nw->check_start,
-					msecs_to_jiffies(3000));
-			return;
-		} else if (nw->drv_state == NRC_DRV_INIT) {
-			/*
-			 * not ready to download,
-			 * so check it again after 10 ms
-			 */
-			schedule_delayed_work(&nw->check_start,
-					msecs_to_jiffies(10));
-			return;
-		}
-		/* just finished downloading, so go forward as normal flow */
-		nw->drv_state = NRC_DRV_INIT;
-		nrc_release_fw(nw);
-	}
-
-#if defined(CONFIG_CHECK_READY)
-	while (!nrc_hif_check_ready(nw->hif)) {
-		nrc_dbg(NRC_DBG_HIF, "Target doesn't ready yet.\n");
-		mdelay(100);
-	}
-#endif /* defined(CONFIG_CHECK_READY) */
-
-	nw->drv_state = NRC_DRV_START;
-	nw->c_bcn = NULL;
-	nw->c_prb_resp = NULL;
-
-	nrc_hif_resume(nw->hif);
-
-	init_completion(&nw->wim_responded);
-	nw->workqueue = create_singlethread_workqueue("nrc_wq");
-	nw->ps_wq = create_singlethread_workqueue("nrc_ps_wq");
-
 	skb_req = nrc_wim_alloc_skb(nw, WIM_CMD_START, sizeof(int));
 	if (!skb_req)
-		goto fail_start;
+		return -ENOMEM;
+
 	p = nrc_wim_skb_add_tlv(skb_req, WIM_TLV_DRV_INFO,
-			sizeof(struct wim_drv_info_param), NULL);
-	p->boot_mode = (nw->fw_priv->num_chunks > 0) ? 1 : 0;
+							sizeof(struct wim_drv_info_param), NULL);
+	p->boot_mode = !!fw_name;
 	p->cqm_off = disable_cqm;
 	p->bitmap_encoding = bitmap_encoding;
 	p->reverse_scrambler = reverse_scrambler;
+	p->kern_ver = (NRC_TARGET_KERNEL_VERSION>>8)&0x0fff; // 12 bits for kernel version (4 for major, 8 for minor)
+	p->vendor_oui = VENDOR_OUI;
+	/* 0: HW PTK/GTK, 1: SW PTK/GTK, 2: HW PTK, SW GTK */
+	if(sw_enc < 0)
+		sw_enc = 0;
+	p->sw_enc = sw_enc;
 	skb_resp = nrc_xmit_wim_request_wait(nw, skb_req, (WIM_RESP_TIMEOUT * 30));
 	if (skb_resp)
 		nrc_on_fw_ready(skb_resp, nw);
 	else
-		goto fail_start;
-
-	ret = nrc_register_hw(nw);
-	if (ret) {
-		pr_err("failed to register hw\n");
-		goto fail_start;
-	}
-
-	ret = nrc_netlink_init(nw);
-	if (ret) {
-		pr_err("failed to register netlink\n");
-		goto fail_start;
-	}
-
-	return;
-
- fail_start:
-	nrc_free_hw(nw);
-
-	nw->drv_state = NRC_DRV_INIT;
-
-	nrc_dbg(NRC_DBG_MAC, "-%s:error!!", __func__);
-}
-
-static int nrc_platform_probe(struct platform_device *pdev)
-{
-	struct nrc *nw;
-	int ret;
-
-	nw = nrc_alloc_hw(pdev);
-	if (!nw)
-		return -ENOMEM;
-
-	nrc_dbg_init(nw);
-	nw->loopback = loopback;
-	nw->lb_count = lb_count;
-
-	nw->fw_priv = nrc_fw_init(nw);
-	if (!nw->fw_priv) {
-		pr_err("failed to initialize fw");
-		ret = -EINVAL;
-		nrc_probed = false;
-		goto fail;
-	}
-
-	nw->hif = nrc_hif_init(nw);
-	if (!nw->hif) {
-		pr_err("failed to initialize hif");
-		ret = -EINVAL;
-		nrc_probed = false;
-		goto fail;
-	}
-
-	INIT_DELAYED_WORK(&nw->check_start, nrc_check_start);
-
-	platform_set_drvdata(pdev, nw);
-
-	nw->drv_state = NRC_DRV_INIT;
-	nw->fw = NULL;
-
-	schedule_delayed_work(&nw->check_start, msecs_to_jiffies(10));
-
-	return 0;
-
- fail:
-	nrc_free_hw(nw);
-	platform_set_drvdata(pdev, NULL);
-
-	return ret;
-}
-
-static int nrc_platform_remove(struct platform_device *pdev)
-{
-	struct nrc *nw = platform_get_drvdata(pdev);
-	int counter = 0;
-
-	while(atomic_read(&nw->d_deauth.delayed_deauth)) {
-		msleep(100);
-		if (counter++ > 10) {
-			atomic_set(&nw->d_deauth.delayed_deauth, 0);
-			gpio_set_value(RPI_GPIO_FOR_PS, 0);
-			break;
-		}
-	}
-
-	if (nw->drv_state == NRC_DRV_PS) {
-		gpio_set_value(RPI_GPIO_FOR_PS, 1);
-		msleep(20);
-	}
-	nw->drv_state = NRC_DRV_CLOSING;
-
-	cancel_delayed_work(&nw->check_start);
-	cancel_delayed_work(&nw->fake_bcn);
-	flush_delayed_work(&nw->fake_bcn);
-	cancel_delayed_work(&nw->fake_prb_resp);
-	flush_delayed_work(&nw->fake_prb_resp);
-	if (nw->c_bcn) {
-		dev_kfree_skb_any(nw->c_bcn);
-		nw->c_bcn = NULL;
-	}
-	if (nw->c_prb_resp) {
-		dev_kfree_skb_any(nw->c_prb_resp);
-		nw->c_prb_resp = NULL;
-	}
-
-	if (ieee80211_hw_check(nw->hw, SUPPORTS_DYNAMIC_PS)) {
-		del_timer_sync(&nw->dynamic_ps_timer);
-	}
-
-	if (!loopback) {
-		nrc_netlink_exit();
-		gpio_set_value(RPI_GPIO_FOR_PS, 0);
-		nrc_unregister_hw(nw);
-		nrc_fw_exit(nw->fw_priv);
-	}
-	nrc_hif_close(nw->hif);
-	nrc_hif_exit(nw->hif);
-
-	if (nw->hw)
-		nrc_free_hw(nw);
-
-	platform_set_drvdata(pdev, NULL);
-	nw->drv_state = NRC_DRV_CLOSED;
-	nw->pdev = NULL;
-#if defined(ENABLE_HW_RESET)
-	gpio_set_value(RPI_GPIO_FOR_RST, 0);
-	gpio_free(RPI_GPIO_FOR_RST);
-#endif
-
+		return -ETIMEDOUT;
 	return 0;
 }
-
-static struct platform_driver nrc_driver = {
-	.driver = {
-		.name = "nrc80211",
-	},
-	.probe = nrc_platform_probe,
-	.remove = nrc_platform_remove,
-};
-
-static void nrc_device_release(struct device *dev)
-{
-}
-
-static struct platform_device nrc_device = {
-	.name = "nrc80211",
-	.id = -1,
-	.dev.release = nrc_device_release,
-};
 
 void nrc_set_bss_max_idle_offset(int value)
 {
@@ -687,61 +555,250 @@ void nrc_set_auto_ba(bool toggle)
 	nrc_dbg(NRC_DBG_MAC, "%s: Auto BA session feature %s", __func__, auto_ba ? "ON" : "OFF");
 }
 
-static int __init nrc_init(void)
+int nrc_nw_set_model_conf(struct nrc *nw, u16 chip_id)
 {
-	int err;
+	nw->chip_id = chip_id;
+	dev_info(nw->dev, "Configuration of H/W Dependent Setting : %04x\n", nw->chip_id);
 
-	err = nrc_stats_init();
-	if (err)
-		return err;
+	/**
+	 * Config List
+	 * - hw_queues
+	 * - wowlan_pattern_num
+	 */
+	switch (nw->chip_id) {
+		case 0x7292:
+			nw->hw_queues = 6;
+			nw->wowlan_pattern_num = 1;
+			break;
+		case 0x7393:
+		case 0x7394:
+			nw->hw_queues = 11;
+			nw->wowlan_pattern_num = 2;
+			break;
+		default:
+			pr_err("Unknown Newracom IEEE80211 chipset %04x", nw->chip_id);
+			BUG();
+	}
 
-#if defined(CONFIG_SUPPORT_BD)
-	err = nrc_check_bd();
-	if (err)
-		return err;
-#endif /* defined(CONFIG_SUPPORT_BD) */
+	dev_info(nw->dev, "- HW_QUEUES: %d\n", nw->hw_queues);
+	dev_info(nw->dev, "- WoWLAN Pattern num: %d\n", nw->wowlan_pattern_num);
 
-	err = platform_device_register(&nrc_device);
-	if (err)
-		return err;
+	return 0;
+}
 
-	err = platform_driver_register(&nrc_driver);
-	if (err)
-		goto fail_driver_register;
+#define MAX_FW_RETRY_CNT  30
+int nrc_nw_start(struct nrc *nw)
+{
+	int ret;
+	int i;
 
-	if (nrc_probed == false) {
-		platform_device_unregister(&nrc_device);
-		platform_driver_unregister(&nrc_driver);
+	if (nw->drv_state != NRC_DRV_INIT) {
+		dev_err(nw->dev, "Invalid NW state (%d)\n", nw->drv_state);
 		return -EINVAL;
 	}
-	nrc_set_bss_max_idle_offset(bss_max_idle_offset);
+
+	if (fw_name && !nrc_check_boot_ready(nw)) {
+		dev_err(nw->dev, "Boot not ready\n");
+		return -EINVAL;
+	}
+
+#if defined(CONFIG_SUPPORT_BD)
+	ret = nrc_check_bd();
+	if (ret) {
+		dev_err(nw->dev, "Failed to nrc_check_bd\n");
+		return -EINVAL;
+	}
+#endif
+
+	ret = nrc_check_fw_file(nw);
+	if (ret == true) {
+		nrc_download_fw(nw);
+		nrc_release_fw(nw);
+	}
+
+
+	for (i = 0; i < MAX_FW_RETRY_CNT; i++) {
+		if(nrc_check_fw_ready(nw)) {
+			goto ready;
+		}
+		mdelay(100);
+	}
+	dev_err(nw->dev, "Failed to nrc_check_fw_ready\n");
+	return -ETIMEDOUT;
+
+ready:
+	nw->drv_state = NRC_DRV_START;
+	ret = nrc_hif_start(nw->hif);
+	if (ret) {
+		dev_err(nw->dev, "Failed to nrc_hif_start\n");
+		goto err_return;
+	}
+
+	ret = nrc_fw_start(nw);
+	if (ret) {
+		dev_err(nw->dev, "Failed to nrc_fw_start\n");
+		goto err_return;
+	}
+
+	ret = nrc_netlink_init(nw);
+	if (ret) {
+		dev_err(nw->dev, "Failed to nrc_netlink_init\n");
+		goto err_return;
+	}
+
+	ret = nrc_register_hw(nw);
+	if (ret) {
+		dev_err(nw->dev, "Failed to nrc_register_hw\n");
+		goto err_netlink_deinit;
+	}
+
+	nrc_init_debugfs(nw); /* This function must be called after ieee80211_register_hw */
 
 	return 0;
 
-fail_driver_register:
-	platform_device_unregister(&nrc_device);
-
-	return err;
+err_netlink_deinit:
+	nrc_netlink_exit();
+err_return:
+	return ret;
 }
-module_init(nrc_init);
 
-static void __exit nrc_exit(void)
+int nrc_nw_stop(struct nrc *nw)
 {
-	nrc_dbg(NRC_DBG_MAC, "+%s", __func__);
+	int counter = 0;
+
+	while(atomic_read(&nw->d_deauth.delayed_deauth)) {
+		msleep(100);
+		if (counter++ > 10) {
+			atomic_set(&nw->d_deauth.delayed_deauth, 0);
+			nrc_hif_sleep_target_prepare(nw->hif, power_save);
+			break;
+		}
+	}
+
+	if (nw->drv_state == NRC_DRV_PS) {
+		nrc_hif_wake_target(nw->hif);
+		msleep(20);
+	}
+
+	nw->drv_state = NRC_DRV_CLOSING;
+
+	nrc_cleanup_txq_all(nw);
 
 	nrc_exit_debugfs();
 
-	platform_device_unregister(&nrc_device);
-	platform_driver_unregister(&nrc_driver);
+	nrc_hif_stop(nw->hif);
+	nrc_hif_cleanup(nw->hif);
+
+	nrc_hif_reset_device(nw->hif);
+
+	if (!loopback) {
+		nrc_netlink_exit();
+		nrc_hif_sleep_target_prepare(nw->hif, power_save);
+		nrc_unregister_hw(nw);
+	}
+
+	return 0;
+}
+
+struct nrc *nrc_nw_alloc(struct device *dev, struct nrc_hif_device *hdev)
+{
+	struct ieee80211_hw *hw;
+	struct nrc *nw;
+
+	hw = nrc_mac_alloc_hw(sizeof(struct nrc), NRC_DRIVER_NAME);
+
+	if (!hw) {
+			return NULL;
+	}
+
+	nw = hw->priv;
+	nw->hw = hw;
+	nw->dev = dev;
+	nw->hif = hdev;
+	hdev->nw = nw;
+
+	nw->loopback = loopback;
+	nw->lb_count = lb_count;
+	nw->drv_state = NRC_DRV_INIT;
+
+	nw->vendor_skb = NULL;
+
+	nrc_stats_init();
+	nw->fw_priv = nrc_fw_init(nw);
+	if (!nw->fw_priv) {
+		dev_err(nw->dev, "Failed to initialize FW");
+		goto err_hw_free;
+	}
+
+	mutex_init(&nw->target_mtx);
+	mutex_init(&nw->state_mtx);
+
+	spin_lock_init(&nw->vif_lock);
+
+	init_completion(&nw->hif_tx_stopped);
+	init_completion(&nw->hif_rx_stopped);
+	init_completion(&nw->hif_irq_stopped);
+	init_completion(&nw->wim_responded);
+
+
+	nw->workqueue = create_singlethread_workqueue("nrc_wq");
+	nw->ps_wq = create_singlethread_workqueue("nrc_ps_wq");
+
+	INIT_DELAYED_WORK(&nw->roc_finish, nrc_mac_roc_finish);
+	INIT_DELAYED_WORK(&nw->rm_vendor_ie_wowlan_pattern, nrc_rm_vendor_ie_wowlan_pattern);
+
+#ifdef CONFIG_NEW_TASKLET_API
+	tasklet_setup(&nw->tx_tasklet, nrc_tx_tasklet);
+#else
+	tasklet_init(&nw->tx_tasklet, nrc_tx_tasklet, (unsigned long) nw);
+#endif
+
+	if (!disable_cqm) {
+		nrc_mac_dbg("CQM is enabled");
+		nw->beacon_timeout = 0;
+#if KERNEL_VERSION(4, 15, 0) > LINUX_VERSION_CODE
+		setup_timer(&nw->bcn_mon_timer,
+					nrc_bcn_mon_timer, (unsigned long)nw);
+#else
+		timer_setup(&nw->bcn_mon_timer, nrc_bcn_mon_timer, 0);
+#endif
+	}
+
+	return nw;
+
+err_hw_free:
+	nrc_mac_free_hw(hw);
+
+	return NULL;
+}
+
+void nrc_nw_free(struct nrc *nw)
+{
+	if (nw->fw_priv) {
+		nrc_fw_exit(nw->fw_priv);
+	}
+
+	tasklet_kill(&nw->tx_tasklet);
+
+	if (!disable_cqm) {
+		del_timer(&nw->bcn_mon_timer);
+	}
+
+	if (nw->workqueue != NULL) {
+		flush_workqueue(nw->workqueue);
+		destroy_workqueue(nw->workqueue);
+	}
+
+	if (nw->ps_wq != NULL) {
+		flush_workqueue(nw->ps_wq);
+		destroy_workqueue(nw->ps_wq);
+	}
+
+	if (nw->vendor_skb) {
+		dev_kfree_skb_any(nw->vendor_skb);
+	}
+
 	nrc_stats_deinit();
 
-	nrc_dbg(NRC_DBG_MAC, "-%s", __func__);
+	nrc_mac_free_hw (nw->hw);
 }
-module_exit(nrc_exit);
-
-MODULE_AUTHOR("Newracom, Inc.(http://www.newracom.com)");
-MODULE_LICENSE("Dual BSD/GPL");
-MODULE_DESCRIPTION("Newracom 802.11 driver");
-#if KERNEL_VERSION(5, 12, 0) > NRC_TARGET_KERNEL_VERSION
-MODULE_SUPPORTED_DEVICE("Newracom 802.11 devices");
-#endif

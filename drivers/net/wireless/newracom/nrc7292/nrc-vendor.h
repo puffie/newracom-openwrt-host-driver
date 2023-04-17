@@ -20,6 +20,12 @@
 #define OUI_IEEE_REGISTRATION_AUTHORITY		0xFCFFAA
 
 /**
+ * iw vendor command can be worked and accepted which includes the same
+ * OUI with this 'VENDOR_OUI'
+ */
+#define VENDOR_OUI							(OUI_IEEE_REGISTRATION_AUTHORITY)
+
+/**
  * A subcmd to remove the vendor specific IE which was injected before.
  * ex>$sudo iw dev wlan0 vendor send 0xfcffaa 0xde 0x2
  *   => this cmd will remove the injected vendor specific IE
@@ -32,7 +38,7 @@
  * This is used to wake up the target in deep-sleep.
  * [direction]: OUTPUT
  */
-#define RPI_GPIO_FOR_PS						(20)
+#define RPI_GPIO_FOR_PS						(20) //NRC7292 EVB
 
 /*
  * GPIO pin number on the target device.
@@ -40,7 +46,7 @@
  * which will read signal from RPI_GPIO_FOR_RS for waking up target.
  * [direction]: INPUT
  */
-#define TARGET_GPIO_FOR_WAKEUP				(11)
+#define TARGET_GPIO_FOR_WAKEUP				(11) //NRC7292 EVB
 
 /*
  * GPIO pin number on the target device.
@@ -58,6 +64,7 @@ enum nrc_vendor_event {
 	NRC_SUBCMD_ANNOUNCE3,
 	NRC_SUBCMD_ANNOUNCE4,
 	NRC_SUBCMD_ANNOUNCE5,
+	NRC_SUBCMD_REMOTECMD,
 	NRC_SUBCMD_WOWLAN_PATTERN,
 	NUM_VENDOR_EVENT,
 	MAX_VENDOR_EVENT = NUM_VENDOR_EVENT - 1
@@ -67,6 +74,12 @@ enum nrc_vendor_attributes {
 	NRC_VENDOR_ATTR_DATA = 0,
 	NUM_VENDOR_ATTR,
 	MAX_VENDOR_ATTR = NUM_VENDOR_ATTR - 1
+};
+
+struct remotecmd_params {
+	struct wiphy *wiphy;
+	struct wireless_dev *wdev;
+	u8 subcmd;
 };
 
 #endif /* _NRC_VENDOR_H_ */

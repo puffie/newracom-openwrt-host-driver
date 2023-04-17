@@ -26,20 +26,14 @@ $(M_SRC)-objs = \
 		nrc-pm.o \
 		nrc-dump.o \
 		nrc-bd.o \
-		nrc-recovery.o
+		nrc-s1g.o \
 
 ccflags-y := \
 	-DDEBUG \
-	-DBUILD_UMAC_DRIVER \
 	-DCONFIG_NRC_HIF_CSPI \
+	-DENABLE_DYNAMIC_PS \
 	-DCONFIG_MAC80211_MESH
-	#-DENABLE_HW_RESET
-	#-DCONFIG_NRC_HIF_SDIO
-	#-DCONFIG_NRC_HIF_DEBUG \
-	#-DCONFIG_NRC_HIF_UART \
-	#-DCONFIG_NRC_HIF_AH_UART \
-	#-DCONFIG_NRC_HIF_SSP
 
-ccflags-$(CONFIG_SOC_MT7620) += -DCONFIG_SUPPORT_MT76x8 -DCONFIG_SUPPORT_JMP
+ccflags-$(CONFIG_SOC_MT7620) += -DCONFIG_SPI_HALF_DUPLEX -DCONFIG_SUPPORT_JMP
 
 ldflags-y += -T$(BACKPORT_DIR)/drivers/net/wireless/newracom/nrc7292/nrc.lds

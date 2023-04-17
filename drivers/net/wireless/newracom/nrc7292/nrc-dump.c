@@ -40,7 +40,7 @@ static void write_file(char *filename, char *data, int len)
 #endif
 	filp = filp_open(filename, O_CREAT|O_RDWR, 0606);
 	if (IS_ERR(filp)) {
-		pr_err("[%s] error:%d\n", __func__, IS_ERR(filp));
+		pr_err("[%s] error:%d", __func__, IS_ERR(filp));
 		return;
 	}
 #if KERNEL_VERSION(4, 14, 0) <= NRC_TARGET_KERNEL_VERSION
