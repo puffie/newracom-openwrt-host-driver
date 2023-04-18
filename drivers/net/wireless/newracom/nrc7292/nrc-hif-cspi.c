@@ -47,6 +47,7 @@
 #endif
 #endif
 
+static bool nrc_hif_probed = true;
 static bool once;
 static bool cspi_suspend;
 static atomic_t irq_enabled;
@@ -2442,7 +2443,8 @@ try:
 	}
 
 	if (ret) {
-		dev_err(&spi->dev, "Failed to nrc_hif_probe\n");
+		dev_err(&spi->dev, "Failed to nrc_hif_probe : return %d\n", ret);
+		nrc_hif_probed = false;
 		goto err_hif_free;
 	}
 
@@ -2587,7 +2589,10 @@ static int __init nrc_cspi_init (void)
 		goto unregister_device;
 	}
 
-	pr_info("Succeed to register spi driver(%s).", nrc_cspi_driver.driver.name);
+	if (!nrc_hif_probed) {
+		return -1;
+	}
+	pr_info("Succeed to register spi driver(%s:%d).", nrc_cspi_driver.driver.name, ret);
 	return ret;
 
 unregister_device:
