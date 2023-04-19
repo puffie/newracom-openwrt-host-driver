@@ -37,8 +37,6 @@
 #include "nrc-bd.h"
 #endif /* defined(CONFIG_SUPPORT_BD) */
 
-static bool nrc_probed = true;
-
 char *fw_name = "nrc7292_cspi.bin";
 module_param(fw_name, charp, 0444);
 MODULE_PARM_DESC(fw_name, "Firmware file name");
